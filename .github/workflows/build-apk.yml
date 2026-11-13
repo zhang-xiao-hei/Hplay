@@ -117,14 +117,16 @@ jobs:
 
           # 1) 先按版本号建一个永久 tag，把这一版的历史留住。
           #    少了它的话，apk-latest 被覆盖后旧版本的 APK 就再也找不回来了。
+          #    注意：gh release create **只建 Release 不会带资产**，上传必须单独做，
+          #    新建和已存在两条路径都要上传，否则会留下一个 0 资产的空 Release。
           version_tag="v${version}"
           if gh release view "$version_tag" >/dev/null 2>&1; then
             echo "Release $version_tag already exists, replacing its assets"
-            gh release upload "$version_tag" apk-out/*.apk --clobber
           else
             gh release create "$version_tag" \
               --title "Hplay ${version} APK" --notes "$notes" --target "$GITHUB_SHA"
           fi
+          gh release upload "$version_tag" apk-out/*.apk --clobber
 
           # 2) 再更新滚动 tag apk-latest（永远指向最新版）。
           if gh release view "apk-latest" >/dev/null 2>&1; then
