@@ -1,0 +1,102 @@
+name: Build APK (no secrets)
+
+# Manual button, OR any push touching this workflow file.
+# No GitHub Secrets needed. On success the APKs are also published to a
+# public Release so they can be downloaded without authentication.
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "debug = installable; release = unsigned"
+        required: true
+        default: "debug"
+        type: choice
+        options:
+          - debug
+          - release
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-apk.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-37.0
+            build-tools;36.0.0
+            ndk;28.2.13676358
+            cmake;3.22.1
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build APKs
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          variant="${{ inputs.variant || 'debug' }}"
+          echo "Building $variant"
+          if [ "$variant" = "release" ]; then
+            ./gradlew :mobile:assembleRelease :automotive:assembleRelease --stacktrace
+          else
+            ./gradlew :mobile:assembleDebug :automotive:assembleDebug --stacktrace
+          fi
+
+      - name: Collect APKs
+        run: |
+          set -euo pipefail
+          mkdir -p apk-out
+          variant="${{ inputs.variant || 'debug' }}"
+          if [ "$variant" = "release" ]; then dir=release; else dir=debug; fi
+          for f in mobile/build/outputs/apk/$dir/*.apk; do
+            [ -e "$f" ] && cp "$f" "apk-out/Hplay-mobile-$(basename "$f")"
+          done
+          for f in automotive/build/outputs/apk/$dir/*.apk; do
+            [ -e "$f" ] && cp "$f" "apk-out/Hplay-automotive-$(basename "$f")"
+          done
+          ls -lh apk-out/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hplay-apk
+          path: apk-out/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish APKs to Release
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="apk-latest"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists, replacing assets"
+          else
+            gh release create "$tag" --title "Hplay APK (automated build)" \
+              --notes "Built from commit ${{ github.sha }}. The debug APK is signed with the debug key and can be installed directly. MFi credentials are NOT included." \
+              --target "${{ github.sha }}"
+          fi
+          gh release upload "$tag" apk-out/*.apk --clobber
