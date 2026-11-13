@@ -17,8 +17,11 @@ on:
   push:
     branches:
       - main
-    paths:
-      - ".github/workflows/build-apk.yml"
+    # 每次推送 main 都跑：这是唯一不需要 Secret 的工作流，所以它是唯一能稳定
+    # 验证"代码能编译、单测能过"的 CI。之前只在工作流文件自身变更时触发，
+    # 意味着普通代码提交根本不会被验证。
+    paths-ignore:
+      - "**/*.md"
 
 permissions:
   contents: write
