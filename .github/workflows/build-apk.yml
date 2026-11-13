@@ -51,6 +51,18 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Run unit tests
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          # 这个工作流不需要任何 Secret，所以它是唯一能在每次 push 上稳定跑起来的 CI。
+          # 单元测试放在这里，保证提交进仓库的代码至少编译通过、逻辑测试通过，
+          # 不会等到用户拿到 APK 才发现编不过。
+          ./gradlew \
+            :shared:testDebugUnitTest \
+            :carlife:testDebugUnitTest \
+            --stacktrace
+
       - name: Build APKs
         run: |
           set -euo pipefail
