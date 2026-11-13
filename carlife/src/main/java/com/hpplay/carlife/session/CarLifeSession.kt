@@ -1,6 +1,7 @@
 package com.hpplay.carlife.session
 
 import android.util.Log
+import com.hpplay.carlife.audio.EncodedAudioDecoder
 import com.hpplay.carlife.crypto.CarLifeCrypto
 import com.hpplay.carlife.proto.CarlifeMessages
 import com.hpplay.carlife.protocol.CarLife
@@ -63,10 +64,13 @@ class CarLifeSession(
         fun onAudioData(payload: ByteArray)
 
         /**
-         * 编码音频帧（MSG_MEDIA_DATA_ENCODER / MSG_AUDIO_AAC / MSG_AUDIO_ADPCM_DATA）。
+         * 编码音频帧（MSG_MEDIA_DATA_ENCODER / MSG_AUDIO_AAC）。
          * 小米 CarLife+ 等手机端会走这条消息，原实现整条丢弃导致音乐无声。
+         *
+         * @param expectedMime 按消息号已确定的 MIME（`MSG_AUDIO_AAC` 传 AAC MIME，其余为
+         *   null 表示要靠载荷里的同步字判断）。裸 AAC 没有同步字，只能靠它兜底。
          */
-        fun onEncodedAudioData(payload: ByteArray, serviceType: Int) {}
+        fun onEncodedAudioData(payload: ByteArray, serviceType: Int, expectedMime: String? = null) {}
 
         /** 导航播报格式（TTS 通道 MSG_NAV_TTS_INIT）。未实现时默认丢弃 TTS。 */
         fun onTtsFormat(info: CarlifeMessages.AudioFormatInfo) {}
@@ -235,10 +239,26 @@ class CarLifeSession(
             }
             CarLife.MSG_MEDIA_DATA -> if (frame.payload.isNotEmpty()) callback.onAudioData(frame.payload)
             CarLife.MSG_MEDIA_DATA_ENCODER,
-            CarLife.MSG_AUDIO_AAC,
+            CarLife.MSG_AUDIO_AAC ->
+                if (frame.payload.isNotEmpty()) {
+                    // MSG_AUDIO_AAC 按消息号就能确定是 AAC：有些机型发的是不带 ADTS 头的
+                    // 裸 AAC，载荷里没有同步字，只能靠消息号把格式告诉解码器。
+                    callback.onEncodedAudioData(
+                        frame.payload,
+                        frame.serviceType,
+                        if (frame.serviceType == CarLife.MSG_AUDIO_AAC) {
+                            EncodedAudioDecoder.MIME_AUDIO_AAC
+                        } else {
+                            null
+                        },
+                    )
+                }
             CarLife.MSG_AUDIO_ADPCM_DATA ->
                 if (frame.payload.isNotEmpty()) {
-                    callback.onEncodedAudioData(frame.payload, frame.serviceType)
+                    // ADPCM 是另一种压缩格式，不走 AAC/MP3 解码路径。
+                    // 不能把它塞给 AAC 解码器：那会让解码器认不出帧格式而永久失效，
+                    // 后面手机切回 AAC 也解不出来 —— 表现为"连上了却全程无声"。
+                    Log.w(TAG, "ADPCM audio frame is not supported, dropping ${frame.payload.size}B")
                 }
             CarLife.MSG_AUDIO_HEARTBEAT -> Unit
         }

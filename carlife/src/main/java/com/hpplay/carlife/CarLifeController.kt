@@ -476,7 +476,7 @@ class CarLifeController(
         reportAudioProgress("pcm")
     }
 
-    override fun onEncodedAudioData(payload: ByteArray, serviceType: Int) {
+    override fun onEncodedAudioData(payload: ByteArray, serviceType: Int, expectedMime: String?) {
         // 编码音频不能先建轨：解码输出的采样率可能与车机兜底值不同（ADTS 头里的真实值），
         // 音轨参数不匹配就会"解出来是速度不对的声音"。先解码拿到真实参数，再按它建轨。
         if (mediaDecoder == null) {
@@ -484,7 +484,7 @@ class CarLifeController(
         }
         val decoder = mediaDecoder ?: return
         var pcmOut = 0
-        decoder.decode(payload) { pcm ->
+        decoder.decode(payload, expectedMime) { pcm ->
             pcmOut += pcm.size
             writeMediaPcm(pcm)
         }
