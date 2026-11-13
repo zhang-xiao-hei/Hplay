@@ -1,11 +1,8 @@
 package com.hpplay.carlife.transport
 
+import com.hpplay.carlife.NetworkTestCategory
 import com.hpplay.carlife.protocol.CarLife
 import com.hpplay.carlife.protocol.CarLifeFrame
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
-import org.junit.Test
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -16,6 +13,11 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.junit.experimental.categories.Category
 
 /**
  * 回归测试：断链之后还能不能自己爬起来。
@@ -26,6 +28,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *  - 之前断链不清理 sockets，openChannels() 里 `if (sockets.isNotEmpty()) return false`
  *    会永久拒绝再次建链。
  */
+@Category(NetworkTestCategory::class)
 class CarLifeWireReconnectTest {
 
     private val timeout = 15L

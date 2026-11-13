@@ -390,32 +390,40 @@ object CarlifeMessages {
              * [decode] 在载荷根本不是 protobuf 时会返回默认值 44100/2/16 —— 上层拿它判断
              * "这是一条格式描述帧"就会把真正的音频数据当成格式丢掉。这里额外要求至少解析到
              * 一个字段，否则返回 null，由调用方按裸 PCM 处理。
+             *
+             * 载荷畸形（varint 截断、字段越界）时也返回 null 而不是抛异常：调用方要区分
+             * "这是一条格式帧"和"这是一段音频数据"，抛出异常会把判断结果变成异常路径。
              */
             fun decodeStrict(data: ByteArray): AudioFormatInfo? {
                 var rate = 44100
                 var ch = 2
                 var bits = 16
                 var parsed = 0
-                val r = ProtoIO.Reader(data)
-                while (!r.isAtEnd) {
-                    val (field, wire) = r.nextField()
-                    when (field) {
-                        1 -> {
-                            rate = r.varint().toInt()
-                            parsed++
+                return try {
+                    val r = ProtoIO.Reader(data)
+                    while (!r.isAtEnd) {
+                        val (field, wire) = r.nextField()
+                        when (field) {
+                            1 -> {
+                                rate = r.varint().toInt()
+                                parsed++
+                            }
+                            2 -> {
+                                ch = r.varint().toInt()
+                                parsed++
+                            }
+                            3 -> {
+                                bits = r.varint().toInt()
+                                parsed++
+                            }
+                            else -> r.skip(wire)
                         }
-                        2 -> {
-                            ch = r.varint().toInt()
-                            parsed++
-                        }
-                        3 -> {
-                            bits = r.varint().toInt()
-                            parsed++
-                        }
-                        else -> r.skip(wire)
                     }
+                    if (parsed > 0) AudioFormatInfo(rate, ch, bits) else null
+                } catch (error: IllegalArgumentException) {
+                    // 载荷不是合法的 protobuf（varint 截断等）：按"不是格式帧"处理。
+                    null
                 }
-                return if (parsed > 0) AudioFormatInfo(rate, ch, bits) else null
             }
         }
     }

@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -56,7 +57,9 @@ class AudioFormatInfoTest {
 
     @Test
     fun `strict decode rejects payload that is not protobuf`() {
-        // 裸 PCM 数据：首字节不是任何已知的 varint 字段 tag。
+        // 裸 PCM 数据：首字节会被当成 protobuf 的 key，解析必然越界。
+        // 严格解析必须把它判为"不是格式帧"，而不是抛异常——调用方要靠返回值区分
+        // "格式帧"和"音频数据"，抛异常会把这个判断变成异常路径。
         val pcm = byteArrayOf(0x11, 0x22, 0x33, 0x44, 0x55)
         assertNull(AudioFormatInfo.decodeStrict(pcm))
     }
@@ -74,13 +77,19 @@ class AudioFormatInfoTest {
     }
 
     @Test
-    fun `lenient decode still returns defaults for garbage`() {
-        // 记录旧行为：宽松解析对垃圾输入返回默认值，这正是需要严格解析的原因。
+    fun `lenient decode throws on malformed payload while strict decode does not`() {
+        // 记录宽松解析的旧行为：畸形载荷会让 ProtoIO 抛 IllegalArgumentException。
+        // 这正是不用 decode 的原因——它既可能抛异常，也可能把垃圾当成默认格式返回。
         val pcm = byteArrayOf(0x11, 0x22, 0x33, 0x44, 0x55)
-        val info = AudioFormatInfo.decode(pcm)
-        assertEquals(44100, info.sampleRate)
-        assertEquals(2, info.channelCount)
-        assertEquals(16, info.bitDepth)
+        var threw = false
+        try {
+            AudioFormatInfo.decode(pcm)
+        } catch (error: IllegalArgumentException) {
+            threw = true
+        }
+        assertTrue("malformed payload is expected to break the lenient decoder", threw)
+        // 严格解析必须安全地返回 null。
+        assertNull(AudioFormatInfo.decodeStrict(pcm))
     }
 
     @Test

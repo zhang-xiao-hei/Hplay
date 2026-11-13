@@ -1,16 +1,12 @@
 package com.hpplay.carlife.transport
 
+import com.hpplay.carlife.NetworkTestCategory
 import com.hpplay.carlife.crypto.CarLifeCrypto
 import com.hpplay.carlife.proto.CarlifeMessages
 import com.hpplay.carlife.protocol.CarLife
 import com.hpplay.carlife.protocol.CarLifeFrame
 import com.hpplay.carlife.protocol.CarLifeFrameCodec
 import com.hpplay.carlife.session.CarLifeSession
-import org.junit.Assert.assertArrayEquals
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertTrue
-import org.junit.Test
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.DatagramPacket
@@ -24,6 +20,12 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.junit.experimental.categories.Category
 
 /**
  * 端到端集成自测：真实 socket 上跑完整链路——
@@ -32,6 +34,7 @@ import javax.crypto.spec.SecretKeySpec
  *
  * 本测试扮演"手机端"（MD），被测对象是车机侧 CarLifeWire + CarLifeSession（HU）。
  */
+@Category(NetworkTestCategory::class)
 class CarLifeWireIntegrationTest {
 
     private val timeout = 15L

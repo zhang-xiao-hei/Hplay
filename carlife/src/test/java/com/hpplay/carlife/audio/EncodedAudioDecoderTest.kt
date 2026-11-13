@@ -109,8 +109,25 @@ class EncodedAudioDecoderTest {
 
     @Test
     fun `detects mp3 frame header`() {
+        // MP3 Layer III 帧头：0xFF 0xFB。同步字前 11 位与 ADTS 相同，只有 layer 位能区分。
         val mp3 = byteArrayOf(0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0x00)
         assertEquals("audio/mpeg", detectMime(mp3))
+    }
+
+    @Test
+    fun `does not mistake mp3 frame for adts aac`() {
+        // 回归点：只看 "0xFF + 高位 1" 会把 MP3（0xFF 0xFB）判成 AAC，
+        // 解码器起不来 → 真 MP3 音频彻底无声。
+        val mp3 = byteArrayOf(0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0x00)
+        assertEquals("audio/mpeg", detectMime(mp3))
+        // MP3 帧不能被当成 ADTS 解析出采样率。
+        assertNull(adtsInfo(mp3 + byteArrayOf(0x00, 0x00, 0x00)))
+    }
+
+    @Test
+    fun `detects id3 tagged mp3 stream`() {
+        val id3 = byteArrayOf(0x49, 0x44, 0x33, 0x03)
+        assertEquals("audio/mpeg", detectMime(id3))
     }
 
     @Test

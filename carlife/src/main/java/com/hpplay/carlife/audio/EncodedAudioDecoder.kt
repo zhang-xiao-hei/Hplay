@@ -157,7 +157,8 @@ class EncodedAudioDecoder(
             if (frame.size < 7) return null
             val b0 = frame[0].toInt() and 0xFF
             val b1 = frame[1].toInt() and 0xFF
-            if (!(b0 == 0xFF && (b1 and 0xF0) == 0xF0)) return null
+            // ADTS 要求 layer == 00，否则是 MP3 帧（同步字前 11 位相同）。
+            if (!(b0 == 0xFF && (b1 and 0xF6) == 0xF0 && ((b1 shr 1) and 0x03) == 0x00)) return null
             val b2 = frame[2].toInt() and 0xFF
             val b3 = frame[3].toInt() and 0xFF
             val sampleIndex = (b2 shr 2) and 0x0F
@@ -169,15 +170,28 @@ class EncodedAudioDecoder(
             return AdtsInfo(rate, channelConfig)
         }
 
-        /** ADTS 同步字优先；MP3 帧头 / ID3 次之。 */
+        /**
+         * 判定帧格式。
+         *
+         * ADTS 与 MP3 的同步字前 11 位都是 0xFFE，只有 layer 位能区分：
+         *  - ADTS  要求 layer == 00（byte1 的 bit2-1 = 00）
+         *  - MP3   要求 layer == 01（Layer III，byte1 的 bit2-1 = 01）
+         * 只看 "0xFF + 高位 1" 会把 MP3 帧（0xFF 0xFB）误判成 AAC，解码器起不来，
+         * 结果就是真 MP3 音频彻底没有声音。
+         */
         fun detectMime(frame: ByteArray): String? {
             if (frame.size < 4) return null
             val b0 = frame[0].toInt() and 0xFF
             val b1 = frame[1].toInt() and 0xFF
             val b2 = frame[2].toInt() and 0xFF
-            if (b0 == 0xFF && (b1 and 0xF0) == 0xF0) return MediaFormat.MIMETYPE_AUDIO_AAC
-            if (b0 == 0xFF && (b1 and 0xE0) == 0xE0) return MediaFormat.MIMETYPE_AUDIO_MPEG
+            // ID3v2 标签头：后面跟的是 MP3 帧流。
             if (b0 == 0x49 && b1 == 0x44 && b2 == 0x33) return MediaFormat.MIMETYPE_AUDIO_MPEG
+            if (b0 != 0xFF) return null
+            val layer = (b1 shr 1) and 0x03
+            // ADTS: 同步字 0xFFF + layer 必须为 00
+            if ((b1 and 0xF6) == 0xF0 && layer == 0x00) return MediaFormat.MIMETYPE_AUDIO_AAC
+            // MP3: 同步字 11 位全 1 + Layer III
+            if ((b1 and 0xE0) == 0xE0 && layer == 0x01) return MediaFormat.MIMETYPE_AUDIO_MPEG
             return null
         }
 

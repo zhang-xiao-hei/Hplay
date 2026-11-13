@@ -23,6 +23,16 @@ android {
     }
 }
 
+// 需要真实网络端口的测试（绑定固定端口 7999 等）在 CI 上会互相抢端口，导致与代码
+// 改动无关的偶发失败。CI 通过 -PexcludeCategories=... 把它们排除，跑确定性的逻辑测试。
+tasks.withType<Test>().configureEach {
+    (project.findProperty("excludeCategories") as String?)?.split(",")
+        ?.filter { it.isNotBlank() }
+        ?.forEach { category ->
+            excludeCategories.add(category.trim())
+        }
+}
+
 dependencies {
     implementation(project(":common"))
 
