@@ -3,23 +3,22 @@ plugins {
 }
 
 android {
-    namespace 'com.hpplay.carlife'
-    compileSdk {
-        version release(37)
-    }
+    namespace = 'com.hpplay.carlife'
+    compileSdk = 37
 
     defaultConfig {
-        minSdk 24
+        minSdk = 24
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_11
-        targetCompatibility JavaVersion.VERSION_11
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
     }
 
     testOptions {
-        // CarLifeWire 用 android.util.Log 打日志，JVM 单测里静默掉
-        unitTests.isReturnDefaultValues = true
+        // CarLifeWire 用 android.util.Log 打日志，JVM 单测里静默掉。
+        // Groovy DSL 用 returnDefaultValues（Kotlin DSL 里才是 isReturnDefaultValues）。
+        unitTests.returnDefaultValues = true
     }
 }
 
