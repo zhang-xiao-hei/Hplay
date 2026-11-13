@@ -111,11 +111,29 @@ jobs:
         run: |
           set -euo pipefail
           tag="apk-latest"
+          version="$(grep -E '^hplay\.versionName=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')"
+          vcode="$(grep -E '^hplay\.versionCode=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')"
+          short_sha="${GITHUB_SHA:0:7}"
+          notes="Version ${version} (versionCode ${vcode}), built from commit ${short_sha}. \
+          The debug APK is signed with the debug key and can be installed directly. \
+          MFi credentials are NOT included."
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "Release $tag already exists, replacing assets"
+            echo "Release $tag already exists, refreshing assets"
+            # 换版本号后旧的 .apk 资产会留在 Release 里：--clobber 只能覆盖**同名**文件，
+            # 新旧版本文件名不同，旧文件不会被替换。留着它们的话，下载脚本会把两个版本
+            # 一起拉下来，用户很容易装错版本 —— 所以先删掉全部旧 APK，只留本次构建的。
+            old_assets="$(gh release view "$tag" --json assets --jq '.assets[].name' || true)"
+            for old in $old_assets; do
+              case "$old" in
+                *.apk)
+                  echo "  removing stale asset: $old"
+                  gh release delete-asset "$tag" "$old" -y
+                  ;;
+              esac
+            done
+            gh release edit "$tag" --title "Hplay ${version} APK" --notes "$notes" --target "$GITHUB_SHA"
           else
-            gh release create "$tag" --title "Hplay APK (automated build)" \
-              --notes "Built from commit ${{ github.sha }}. The debug APK is signed with the debug key and can be installed directly. MFi credentials are NOT included." \
-              --target "${{ github.sha }}"
+            gh release create "$tag" --title "Hplay ${version} APK" \
+              --notes "$notes" --target "$GITHUB_SHA"
           fi
           gh release upload "$tag" apk-out/*.apk --clobber
