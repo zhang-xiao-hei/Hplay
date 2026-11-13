@@ -1,22 +1,20 @@
-import org.gradle.api.tasks.testing.Test
-
 plugins {
-    id("com.android.library")
+    id 'com.android.library'
 }
 
 android {
-    namespace = "com.hpplay.carlife"
+    namespace 'com.hpplay.carlife'
     compileSdk {
-        version = release(37)
+        version release(37)
     }
 
     defaultConfig {
-        minSdk = 24
+        minSdk 24
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
     }
 
     testOptions {
@@ -30,23 +28,23 @@ android {
 //
 // 这里按**测试类名模式**排除，而不是用 JUnit Category：Gradle 的 excludeCategories
 // 只对 JUnit Platform 生效，这个工程用的是 JUnit4，用 category 过滤并不可靠。
-// 类名模式过滤（excludeTestsMatching）在所有 Gradle 版本上都稳定可用。
-tasks.withType<Test>().configureEach {
-    val excluded = (project.findProperty("excludeTestClasses") as String?)
-        ?.split(",")
-        ?.map { it.trim() }
-        ?.filter { it.isNotEmpty() }
-        ?: emptyList()
-    excluded.forEach { pattern ->
-        excludeTestsMatching(pattern)
+tasks.withType(Test).configureEach { test ->
+    def excluded = project.findProperty('excludeTestClasses')
+    if (excluded) {
+        excluded.toString().split(',').each { pattern ->
+            def trimmed = pattern.trim()
+            if (trimmed) {
+                test.filter.excludeTestsMatching(trimmed)
+            }
+        }
     }
 }
 
 dependencies {
-    implementation(project(":common"))
+    implementation project(':common')
 
     // common 里 androidx 是 implementation，不透传，这里显式声明宿主 Activity 所需
-    implementation(libs.androidx.activity)
-    implementation(libs.androidx.core.ktx)
-    testImplementation(libs.junit)
+    implementation libs.androidx.activity
+    implementation libs.androidx.core.ktx
+    testImplementation libs.junit
 }
