@@ -10,7 +10,8 @@ import android.util.Log
  * 这条链路上有两套互不冲突的方案，外挂引擎和 Hplay 的 CarPlay 分别验证过：
  *
  * - [CARLIFE_ENGINE]：**外挂 CarLife 引擎的做法，实测可用**。只用标准 `setUsage()`，
- *   导航播报用 `USAGE_ASSISTANT`，音乐用 `USAGE_MEDIA`，contentType 一律 SPEECH。
+ *   导航播报用 `USAGE_ASSISTANT`，音乐用 `USAGE_MEDIA`；音乐 contentType 用 MUSIC
+ *   （见 [contentType]），播报/语音沿用引擎的 SPEECH。
  *   靠系统的音频焦点语义做"压低音乐、播报导航"，不依赖任何车机私有通道，
  *   因此在任何车机上都能工作。
  *
@@ -88,8 +89,17 @@ object CarLifeAudioRouting {
         CarLifeStream.ASSISTANT -> AudioAttributes.USAGE_MEDIA
     }
 
-    /** 引擎三路一律 `setContentType(2)` = CONTENT_TYPE_SPEECH。 */
-    private val CONTENT_TYPE = AudioAttributes.CONTENT_TYPE_SPEECH
+    /**
+     * 音乐用 CONTENT_TYPE_MUSIC，播报/语音沿用引擎的 SPEECH。
+     *
+     * 引擎三路一律 SPEECH 在部分厂商（含小米 CarLife+/CarWith 对接的车机音频 policy）
+     * 会把 USAGE_MEDIA + SPEECH 判成语音流，送到通话/语音通道或直接静音。
+     * 音乐改成标准 MUSIC 才能落到媒体通道；导航/VR 保持引擎行为不变。
+     */
+    private fun contentType(stream: CarLifeStream): Int = when (stream) {
+        CarLifeStream.MEDIA -> AudioAttributes.CONTENT_TYPE_MUSIC
+        else -> AudioAttributes.CONTENT_TYPE_SPEECH
+    }
 
     /**
      * 一行描述这次实际用的路由（日志/排查用）：usage 名 + 厂商声道名（WULING 策略）。
@@ -114,7 +124,7 @@ object CarLifeAudioRouting {
     fun attributes(strategy: CarLifeAudioStrategy, stream: CarLifeStream): AudioAttributes {
         val builder = AudioAttributes.Builder()
             .setUsage(usage(stream))
-            .setContentType(CONTENT_TYPE)
+            .setContentType(contentType(stream))
         if (strategy == CarLifeAudioStrategy.WULING) {
             // 两套标签都写：key_car_audio_type 给厂商 policy 识别 cp_* 声道，
             // addTag("stream=") 给 SvCarAudioManager 选物理通道。

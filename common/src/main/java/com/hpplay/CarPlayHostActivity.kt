@@ -430,6 +430,8 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
     private var carlinkBand = "5g"
     /** settings-only 入口由宿主指定初始协议页签（CarLife/CarLink）。 */
     private var requestedSettingsProtocol: Protocol? = null
+    /** 「通道配置」页签本次的改动，保存时落盘；取消则丢弃。 */
+    private var pendingSettingsTab: Protocol? = null
     private var autoStartOnBoot = false
     private var manufacturer = AirPlayPersistence.DEFAULT_MANUFACTURER
     private var model = AirPlayPersistence.DEFAULT_MODEL
@@ -1434,7 +1436,9 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
             val scope: Protocol?,
         )
         // 必须在构建分类之前确定当前页签，否则 Connection 会按旧协议拼装。
-        settingsProtocol = requestedSettingsProtocol ?: AirPlayPersistence.loadProtocol(this)
+        settingsProtocol = requestedSettingsProtocol
+            ?: AirPlayPersistence.loadSettingsProtocolTab(this)
+            ?: AirPlayPersistence.loadProtocol(this)
         val connectionEntry = CategoryEntry(
             getString(R.string.settings_category_connection),
             getString(R.string.settings_category_connection_sub),
@@ -1741,10 +1745,14 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
                     setOnClickListener {
                         if (settingsProtocol == protocol) return@setOnClickListener
                         settingsProtocol = protocol
+                        // 页签选择本身也要能保存：以前只改内存，关闭设置页后再进来就回到
+                        // 正在运行的协议，用户改过的 CarLife 通道项看着像"没保存"。
+                        pendingSettingsTab = protocol
                         chips.forEach { c -> style(c, c.tag == protocol) }
                         connectionEntry.view = buildConnectionCategory()
                         rebuildNavItems()
                         selectCategory(0)
+                        markSettingsDirty()
                     }
                 }
                 chips += chip
@@ -5046,6 +5054,11 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
     // ------------------------------------------------------------ validation
 
     private fun validateMfiSettings(): Boolean {
+        // 构建包里没有内置 MFi 凭证是**打包条件**，不是用户输入错误。默认 mfiTarget 就是
+        // BUILT_IN，advancedMode 又恒为 true，旧实现会让"内置 MFi 缺失"直接 return false，
+        // 于是「保存并重连」在任何设置改动上都静默失败（通道设置怎么改都存不下来）。
+        // 这里改成：仍然把提示显示出来，但不再阻塞其它设置的保存。
+        val builtInMissing = mfiTarget == MfiTarget.BUILT_IN && !builtInMfiAssetsAvailable()
         val error = when {
             mfiTarget == MfiTarget.I2C && mfiI2cPath.isBlank() ->
                 getString(R.string.error_i2c_path_required)
@@ -5059,8 +5072,6 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
                 getString(R.string.error_select_certificate)
             mfiTarget == MfiTarget.LOCAL_FILES && localMfiPrivateKeyUri.isBlank() ->
                 getString(R.string.error_select_private_key)
-            mfiTarget == MfiTarget.BUILT_IN && !builtInMfiAssetsAvailable() ->
-                getString(R.string.error_built_in_mfi_missing)
             '\u0000' in mfiI2cPath -> getString(R.string.error_i2c_path_null)
             '\u0000' in remoteMfiServer -> getString(R.string.error_remote_address_null)
             '\u0000' in remoteMfiToken -> getString(R.string.error_remote_token_null)
@@ -5070,9 +5081,18 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
                 getString(R.string.error_private_key_uri_null)
             else -> null
         }
+        if (builtInMissing) {
+            Log.w(
+                TAG,
+                "bundled MFi credential is missing from this build; " +
+                    "showing a warning but NOT blocking settings save",
+            )
+        }
+        val hint = error
+            ?: if (builtInMissing) getString(R.string.error_built_in_mfi_missing) else null
         mfiErrorPill?.let {
-            it.text = error.orEmpty()
-            it.visibility = if (error == null) View.GONE else View.VISIBLE
+            it.text = hint.orEmpty()
+            it.visibility = if (hint == null) View.GONE else View.VISIBLE
             (it.parent as? View)?.visibility = it.visibility
         }
         return error == null
@@ -6949,13 +6969,29 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
         // category, so they are only checked when it is open. The manual / existing-Wi-Fi validators
         // already no-op unless that mode is selected — but they must run in the simple view too,
         // because the F510C's "5G LAN" (existing-Wi-Fi) mode is selectable there.
-        if (advancedMode && !validateMfiSettings()) return
-        if (!validateManualHotspotSettings()) return
-        if (!validateExistingWifiSettings()) return
+        //
+        // 校验不通过时必须让用户看得见原因：否则点「保存并重连」毫无反应，用户会以为
+        // "设置根本没生效"。MFI 的错误提示挂在高级分类里，这里再补一条全局日志。
+        if (advancedMode && !validateMfiSettings()) {
+            appendLog("保存被拦截：请检查 MFi 相关设置")
+            return
+        }
+        if (!validateManualHotspotSettings()) {
+            appendLog("保存被拦截：请检查热点 SSID / 频段 / 密码")
+            return
+        }
+        if (!validateExistingWifiSettings()) {
+            appendLog("保存被拦截：请检查局域网 Wi-Fi 设置")
+            return
+        }
         persistMenuSettings()
+        pendingSettingsTab?.let { AirPlayPersistence.saveSettingsProtocolTab(this, it) }
+        pendingSettingsTab = null
         applyAirPlayMirror()
         settingsBaseline = null
         settingsDirty = false
+        // 保存成功也要留痕：用户在日志里能确认"CarLife 音频通道=xxx"确实写进去了。
+        appendLog("设置已保存：CarLife 音频通道=$carlifeAudioStrategy, 分辨率=${carlifeVideoHeight}p")
         val protocolTarget = pendingProtocol
         pendingProtocol = null
         if (protocolTarget != null && protocolTarget != AirPlayPersistence.loadProtocol(this)) {
@@ -6979,6 +7015,7 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
     private fun cancelSettingsEdits() {
         if (!menuOpen) return
         pendingProtocol = null
+        pendingSettingsTab = null
         restoreSettingsBaseline()
         finishSettingsMenu(getString(R.string.finish_settings_discarded))
     }

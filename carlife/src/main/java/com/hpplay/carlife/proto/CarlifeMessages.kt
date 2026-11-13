@@ -383,6 +383,40 @@ object CarlifeMessages {
                 }
                 return AudioFormatInfo(rate, ch, bits)
             }
+
+            /**
+             * 严格解析：只有真的读到了 sampleRate/channelCount/bitDepth 字段才返回结果。
+             *
+             * [decode] 在载荷根本不是 protobuf 时会返回默认值 44100/2/16 —— 上层拿它判断
+             * "这是一条格式描述帧"就会把真正的音频数据当成格式丢掉。这里额外要求至少解析到
+             * 一个字段，否则返回 null，由调用方按裸 PCM 处理。
+             */
+            fun decodeStrict(data: ByteArray): AudioFormatInfo? {
+                var rate = 44100
+                var ch = 2
+                var bits = 16
+                var parsed = 0
+                val r = ProtoIO.Reader(data)
+                while (!r.isAtEnd) {
+                    val (field, wire) = r.nextField()
+                    when (field) {
+                        1 -> {
+                            rate = r.varint().toInt()
+                            parsed++
+                        }
+                        2 -> {
+                            ch = r.varint().toInt()
+                            parsed++
+                        }
+                        3 -> {
+                            bits = r.varint().toInt()
+                            parsed++
+                        }
+                        else -> r.skip(wire)
+                    }
+                }
+                return if (parsed > 0) AudioFormatInfo(rate, ch, bits) else null
+            }
         }
     }
 }

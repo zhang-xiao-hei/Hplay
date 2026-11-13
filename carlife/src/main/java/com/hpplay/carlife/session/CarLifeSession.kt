@@ -62,11 +62,20 @@ class CarLifeSession(
         /** 音频裸 PCM 帧（AUDIO 通道 MSG_MEDIA_DATA）。 */
         fun onAudioData(payload: ByteArray)
 
+        /**
+         * 编码音频帧（MSG_MEDIA_DATA_ENCODER / MSG_AUDIO_AAC / MSG_AUDIO_ADPCM_DATA）。
+         * 小米 CarLife+ 等手机端会走这条消息，原实现整条丢弃导致音乐无声。
+         */
+        fun onEncodedAudioData(payload: ByteArray, serviceType: Int) {}
+
         /** 导航播报格式（TTS 通道 MSG_NAV_TTS_INIT）。未实现时默认丢弃 TTS。 */
         fun onTtsFormat(info: CarlifeMessages.AudioFormatInfo) {}
 
-        /** 导航播报裸 PCM（TTS 通道 MSG_NAV_TTS_DATA / MSG_NAV_TTS_DATA_ENCODE）。 */
+        /** 导航播报裸 PCM（TTS 通道 MSG_NAV_TTS_DATA）。 */
         fun onTtsData(payload: ByteArray) {}
+
+        /** 编码的导航播报（MSG_NAV_TTS_DATA_ENCODE）：不能再当 PCM 播放，否则只有噪声。 */
+        fun onTtsEncodedData(payload: ByteArray) {}
 
         /** 一次导航播报结束（TTS 通道 MSG_NAV_TTS_END）：释放焦点、恢复媒体音量。 */
         fun onTtsFinished() {}
@@ -181,30 +190,64 @@ class CarLifeSession(
         } else {
             frame
         }
-        when (decrypted.channel) {
-            CarLife.CHANNEL_CMD -> onCommand(decrypted)
-            CarLife.CHANNEL_VIDEO -> onVideo(decrypted)
-            CarLife.CHANNEL_AUDIO -> onAudio(decrypted)
-            CarLife.CHANNEL_AUDIO_TTS -> onTts(decrypted)
-            // VR 通道（5）：语音助手。当前只记录，未接音频输出。
-            CarLife.CHANNEL_AUDIO_VR -> Unit
-            else -> Unit
-        }
+        // 单帧解析异常不能把读线程带崩：否则之后所有音频/视频帧都收不到，
+        // 表现就是"连上了但音乐和画面都没了"。
+        runCatching {
+            when (decrypted.channel) {
+                CarLife.CHANNEL_CMD -> onCommand(decrypted)
+                CarLife.CHANNEL_VIDEO -> onVideo(decrypted)
+                CarLife.CHANNEL_AUDIO -> onAudio(decrypted)
+                CarLife.CHANNEL_AUDIO_TTS -> onTts(decrypted)
+                // VR 通道（5）：语音助手。当前只记录，未接音频输出。
+                CarLife.CHANNEL_AUDIO_VR -> Unit
+                else -> Unit
+            }
+        }.onFailure { Log.w(TAG, "frame dispatch failed: ${it.javaClass.simpleName}", it) }
     }
 
     private fun onAudio(frame: CarLifeFrame) {
         when (frame.serviceType) {
             CarLife.MSG_MEDIA_INIT -> {
-                val info = CarlifeMessages.AudioFormatInfo.decode(frame.payload)
-                Log.i(
-                    TAG,
-                    "audio format: ${info.sampleRate} Hz, ${info.channelCount} ch, ${info.bitDepth} bit",
-                )
-                callback.onAudioFormat(info.sampleRate, info.channelCount, info.bitDepth)
+                // 0x30001 在部分手机（小米 CarLife+/CarWith）上并不是格式描述，而是音频数据，
+                // 也可能根本不发、直接上 0x30006/0x30007。这里按载荷内容判断，解析不出合理
+                // 的 protobuf 格式就当作裸 PCM，避免整条音乐通道被静默丢弃。
+                val payload = frame.payload
+                val looksLikeFormat = payload.isNotEmpty() &&
+                    (payload[0].toInt() and 0xFF) in FORMAT_FIELD_TAGS
+                val info = if (looksLikeFormat) {
+                    // 用严格解析：普通 decode 在载荷不是 protobuf 时会返回默认 44100/2/16，
+                    // 会被后面的合理性判断误当成合法格式帧，从而把真正的音频丢掉。
+                    runCatching { CarlifeMessages.AudioFormatInfo.decodeStrict(payload) }
+                        .getOrNull()
+                } else {
+                    null
+                }
+                if (info != null && plausibleAudioFormat(info)) {
+                    Log.i(
+                        TAG,
+                        "audio format: ${info.sampleRate} Hz, ${info.channelCount} ch, ${info.bitDepth} bit",
+                    )
+                    callback.onAudioFormat(info.sampleRate, info.channelCount, info.bitDepth)
+                } else if (payload.isNotEmpty()) {
+                    Log.w(TAG, "MSG_MEDIA_INIT is not a format descriptor; treating as PCM data")
+                    callback.onAudioData(payload)
+                }
             }
             CarLife.MSG_MEDIA_DATA -> if (frame.payload.isNotEmpty()) callback.onAudioData(frame.payload)
+            CarLife.MSG_MEDIA_DATA_ENCODER,
+            CarLife.MSG_AUDIO_AAC,
+            CarLife.MSG_AUDIO_ADPCM_DATA ->
+                if (frame.payload.isNotEmpty()) {
+                    callback.onEncodedAudioData(frame.payload, frame.serviceType)
+                }
+            CarLife.MSG_AUDIO_HEARTBEAT -> Unit
         }
     }
+
+    private fun plausibleAudioFormat(info: CarlifeMessages.AudioFormatInfo): Boolean =
+        info.sampleRate in 8000..192000 &&
+            info.channelCount in 1..8 &&
+            info.bitDepth in setOf(8, 16, 24, 32)
 
     /**
      * 导航播报通道（4）。
@@ -223,8 +266,10 @@ class CarLifeSession(
                 )
                 callback.onTtsFormat(info)
             }
-            CarLife.MSG_NAV_TTS_DATA, CarLife.MSG_NAV_TTS_DATA_ENCODE ->
+            CarLife.MSG_NAV_TTS_DATA ->
                 if (frame.payload.isNotEmpty()) callback.onTtsData(frame.payload)
+            CarLife.MSG_NAV_TTS_DATA_ENCODE ->
+                if (frame.payload.isNotEmpty()) callback.onTtsEncodedData(frame.payload)
             CarLife.MSG_NAV_TTS_END -> {
                 Log.i(TAG, "tts ended")
                 callback.onTtsFinished()
@@ -331,6 +376,10 @@ class CarLifeSession(
                     CarLife.MSG_CMD_HU_FEATURE_CONFIG_RESPONSE,
                     CarlifeMessages.FeatureConfigList(
                         features = CarLifeCompat.FEATURES,
+                        // 明确告诉手机"车机没有蓝牙音频"，配合 AUDIO_TRANSMISSION_MODE=0
+                        // 走 CarLife 协议音频。小米 CarLife+/CarWith 在字段缺失时会按
+                        // 蓝牙 A2DP 输出音乐，本机没有 A2DP sink 就变成彻底无声。
+                        huBtAudioSupport = false,
                         huBtName = "",
                         huBtMac = "",
                     ).encode(),
@@ -412,5 +461,8 @@ class CarLifeSession(
         const val DEVICE_ID = "hplay-vehicle"
 
         private const val TAG = "CarLifeSession"
+
+        /** AudioFormatInfo 的 protobuf 字段 tag：1=0x08, 2=0x10, 3=0x18（都是 varint）。 */
+        private val FORMAT_FIELD_TAGS = setOf(0x08, 0x10, 0x18)
     }
 }

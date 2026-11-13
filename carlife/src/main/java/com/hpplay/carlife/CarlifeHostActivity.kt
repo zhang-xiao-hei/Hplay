@@ -187,45 +187,51 @@ class CarlifeHostActivity : com.hpplay.LanguageAwareActivity() {
         activeAudioStrategy = CarLifeAudioStrategy.fromStorageKey(
             com.hpplay.AirPlayPersistence.loadCarlifeAudioStrategy(this),
         )
-        controller = CarLifeController(this, object : CarLifeController.Listener {
-            override fun onStatusChanged(status: String) {
-                carlifeLog("status: $status")
-                runOnUiThread { statusPill?.text = status }
-            }
-
-            override fun onSessionEstablished() {
-                carlifeLog("session established")
-                runOnUiThread {
-                    statusPill?.text = getString(R.string.carlife_connected)
-                    idleOverlay?.visibility = View.GONE
-                    idleCard?.visibility = View.GONE
-                    cardHostView?.visibility = View.GONE
-                    // 投屏开始后不再显示左右两个悬浮按钮（退出/设置）；三指下滑仍可打开设置。
-                    topBarView?.animate()?.alpha(0f)?.setDuration(200)?.withEndAction {
-                        topBarView?.visibility = View.GONE
-                    }?.start()
+        controller = CarLifeController(
+            this,
+            object : CarLifeController.Listener {
+                override fun onStatusChanged(status: String) {
+                    carlifeLog("status: $status")
+                    runOnUiThread { statusPill?.text = status }
                 }
-            }
 
-            override fun onDiagnostic(message: String) {
-                carlifeLog(message)
-            }
-
-            override fun onDisconnected(reason: String) {
-                Log.w(TAG, "disconnected: $reason")
-                carlifeLog("disconnected: $reason")
-                runOnUiThread {
-                    if (idleOverlay?.visibility == View.GONE) {
-                        idleOverlay?.visibility = View.VISIBLE
-                        idleCard?.visibility = View.VISIBLE
-                        cardHostView?.visibility = View.VISIBLE
-                        topBarView?.visibility = View.VISIBLE
-                        topBarView?.alpha = 1f
+                override fun onSessionEstablished() {
+                    carlifeLog("session established")
+                    runOnUiThread {
+                        statusPill?.text = getString(R.string.carlife_connected)
+                        idleOverlay?.visibility = View.GONE
+                        idleCard?.visibility = View.GONE
+                        cardHostView?.visibility = View.GONE
+                        // 投屏开始后不再显示左右两个悬浮按钮（退出/设置）；三指下滑仍可打开设置。
+                        topBarView?.animate()?.alpha(0f)?.setDuration(200)?.withEndAction {
+                            topBarView?.visibility = View.GONE
+                        }?.start()
                     }
-                    statusPill?.text = getString(R.string.carlife_disconnected)
                 }
-            }
-        })
+
+                override fun onDiagnostic(message: String) {
+                    carlifeLog(message)
+                }
+
+                override fun onDisconnected(reason: String) {
+                    Log.w(TAG, "disconnected: $reason")
+                    carlifeLog("disconnected: $reason")
+                    runOnUiThread {
+                        if (idleOverlay?.visibility == View.GONE) {
+                            idleOverlay?.visibility = View.VISIBLE
+                            idleCard?.visibility = View.VISIBLE
+                            cardHostView?.visibility = View.VISIBLE
+                            topBarView?.visibility = View.VISIBLE
+                            topBarView?.alpha = 1f
+                        }
+                        statusPill?.text = getString(R.string.carlife_disconnected)
+                    }
+                }
+            },
+            // 必须把设置里的音频声道策略交给控制器：不传的话构造参数会用默认值
+            // CARLIFE_ENGINE，用户在设置里选的"五菱通道"完全不起作用（表现为改了没反应）。
+            activeAudioStrategy,
+        )
         controller?.start()
         registerCarLifeUsb()
         applyPhoneIpHint(intent)

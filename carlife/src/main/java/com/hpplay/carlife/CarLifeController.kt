@@ -11,6 +11,7 @@ import android.util.Log
 import com.hpplay.carlife.crypto.CarLifeCrypto
 import com.hpplay.carlife.audio.CarLifeAudioRouting
 import com.hpplay.carlife.audio.CarLifeAudioStrategy
+import com.hpplay.carlife.audio.EncodedAudioDecoder
 import com.hpplay.carlife.audio.CarLifeStream
 import com.hpplay.carlife.proto.CarlifeMessages
 import com.hpplay.carlife.protocol.CarLife
@@ -58,7 +59,26 @@ class CarLifeController(
     private var ttsTrack: AudioTrack? = null
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     private var navFocus: AudioFocusRequest? = null
+    /** 媒体焦点：部分车机音频 policy 只输出持有焦点的媒体流，不申请就是无声。 */
+    private var mediaFocus: AudioFocusRequest? = null
+    private var mediaDecoder: EncodedAudioDecoder? = null
+    private var ttsDecoder: EncodedAudioDecoder? = null
+    /** 手机没有下发 MSG_MEDIA_INIT 时用的兜底格式。 */
+    private var mediaSampleRate = 44100
+    private var mediaChannels = 2
+    private var mediaBits = 16
+    private var ttsSampleRate = 16000
+    private var ttsChannels = 1
+    private var ttsBits = 16
+    @Volatile private var audioFrames = 0
+    @Volatile private var audioBytes = 0L
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    /** 手机端漏发 MSG_NAV_TTS_END 时兜底释放 duck 焦点，否则音乐会一直被压到静音。 */
+    private val ttsFocusTimeout = Runnable {
+        Log.i(TAG, "tts focus watchdog fired: phone never sent MSG_NAV_TTS_END")
+        listener.onDiagnostic("tts focus watchdog released duck (no MSG_NAV_TTS_END)")
+        abandonNavigationFocus()
+    }
 
     private val wire = CarLifeWire(this)
     @Volatile
@@ -243,7 +263,7 @@ class CarLifeController(
             videoDecoder?.release()
             videoDecoder = null
         }
-        releaseAudio()
+        releaseMediaPipeline()
         releaseTtsAudio()
         abandonNavigationFocus()
     }
@@ -426,14 +446,110 @@ class CarLifeController(
     }
 
     override fun onAudioFormat(sampleRate: Int, channels: Int, bits: Int) {
-        releaseAudio()
-        audioTrack = createTrack(sampleRate, channels, bits, CarLifeStream.MEDIA, "media")
+        // 手机端可能下发 0 / 异常值，直接拿去建 AudioTrack 会抛异常后整路静音。
+        mediaSampleRate = sampleRate.takeIf { it in 8000..192000 } ?: 44100
+        mediaChannels = channels.takeIf { it in 1..2 } ?: 2
+        mediaBits = if (bits == 8) 8 else 16
+        // 格式变了，编码流的解码参数也可能变了：解码器一起重建。
+        releaseMediaPipeline()
+        audioTrack = createTrack(mediaSampleRate, mediaChannels, mediaBits, CarLifeStream.MEDIA, "media")
+        requestMediaFocus()
+        listener.onDiagnostic(
+            "media format ${mediaSampleRate}Hz ${mediaChannels}ch ${mediaBits}bit " +
+                "track=${audioTrack != null}",
+        )
     }
 
     override fun onAudioData(payload: ByteArray) {
-        val track = audioTrack ?: return
-        runCatching { track.write(payload, 0, payload.size) }
-            .onFailure { Log.w(TAG, "audio write failed: ${it.message}") }
+        val track = ensureMediaTrack() ?: return
+        val written = try {
+            track.write(payload, 0, payload.size)
+        } catch (error: Throwable) {
+            Log.w(TAG, "audio write failed: ${error.message}")
+            -1
+        }
+        audioFrames += 1
+        audioBytes += written.coerceAtLeast(0)
+        if (written <= 0) {
+            Log.w(TAG, "audio write returned $written, state=${track.state}, frames=$audioFrames")
+        }
+        reportAudioProgress("pcm")
+    }
+
+    override fun onEncodedAudioData(payload: ByteArray, serviceType: Int) {
+        // 编码音频不能先建轨：解码输出的采样率可能与车机兜底值不同（ADTS 头里的真实值），
+        // 音轨参数不匹配就会"解出来是速度不对的声音"。先解码拿到真实参数，再按它建轨。
+        if (mediaDecoder == null) {
+            mediaDecoder = EncodedAudioDecoder(mediaSampleRate, mediaChannels)
+        }
+        val decoder = mediaDecoder ?: return
+        var pcmOut = 0
+        decoder.decode(payload) { pcm ->
+            pcmOut += pcm.size
+            writeMediaPcm(pcm)
+        }
+        if (pcmOut == 0 && !decoder.isFailed()) {
+            // 第一帧用来建解码器，这一帧没有产出 PCM：用解码器认定的真实参数重建音轨，
+            // 后续帧才有正确的播放速度。
+            val rate = decoder.resolvedSampleRate()
+            val channels = decoder.resolvedChannels()
+            if (rate != mediaSampleRate || channels != mediaChannels) {
+                Log.i(TAG, "media track reconfigure to ${rate}Hz ${channels}ch (decoder source)")
+                mediaSampleRate = rate
+                mediaChannels = channels
+                rebuildMediaTrack()
+            }
+        }
+        audioFrames += 1
+        audioBytes += payload.size
+        reportAudioProgress("encoded/$serviceType")
+    }
+
+    /** 把一段 PCM 写进媒体轨；音轨不存在时按当前参数兜底创建。 */
+    private fun writeMediaPcm(pcm: ByteArray) {
+        val track = ensureMediaTrack() ?: return
+        val written = try {
+            track.write(pcm, 0, pcm.size)
+        } catch (error: Throwable) {
+            Log.w(TAG, "decoded audio write failed: ${error.message}")
+            -1
+        }
+        if (written <= 0) {
+            Log.w(TAG, "decoded write returned $written, state=${track.state}")
+        }
+    }
+
+    /**
+     * 手机没发 MSG_MEDIA_INIT（或先发数据后发格式）时也必须有一条可写的音轨，
+     * 否则 onAudioData 的 `track ?: return` 会把整首歌丢掉 —— 小米机型常见表现。
+     *
+     * 如果解码器已经起来了，用它认定的真实采样率/声道数建轨，避免播放速度不对。
+     */
+    private fun ensureMediaTrack(): AudioTrack? {
+        audioTrack?.let { return it }
+        val decoder = mediaDecoder
+        val rate = decoder?.resolvedSampleRate() ?: mediaSampleRate
+        val channels = decoder?.resolvedChannels() ?: mediaChannels
+        Log.w(
+            TAG,
+            "no media format from phone; creating fallback track " +
+                "${rate}Hz ${channels}ch ${mediaBits}bit",
+        )
+        mediaSampleRate = rate
+        mediaChannels = channels
+        audioTrack = createTrack(rate, channels, mediaBits, CarLifeStream.MEDIA, "media")
+        requestMediaFocus()
+        listener.onDiagnostic("media track created lazily (phone sent no format init)")
+        return audioTrack
+    }
+
+    private fun reportAudioProgress(kind: String) {
+        if (audioFrames == 1 || audioFrames % 200 == 0) {
+            listener.onDiagnostic(
+                "media $kind frames=$audioFrames bytes=$audioBytes " +
+                    "track=${audioTrack != null} focus=${mediaFocus != null}",
+            )
+        }
     }
 
     /**
@@ -443,27 +559,54 @@ class CarLifeController(
      * 焦点用 GAIN_TRANSIENT_MAY_DUCK —— 音乐只被压低而不中断，播报结束自动恢复。
      */
     override fun onTtsFormat(info: CarlifeMessages.AudioFormatInfo) {
+        ttsSampleRate = info.sampleRate.takeIf { it in 8000..192000 } ?: 16000
+        ttsChannels = info.channelCount.takeIf { it in 1..2 } ?: 1
+        ttsBits = if (info.bitDepth == 8) 8 else 16
         releaseTtsAudio()
         ttsTrack = createTrack(
-            info.sampleRate,
-            info.channelCount,
-            info.bitDepth,
+            ttsSampleRate,
+            ttsChannels,
+            ttsBits,
             CarLifeStream.NAVIGATION,
             "tts",
         )
         requestNavigationFocus()
+        scheduleTtsFocusTimeout()
     }
 
     override fun onTtsData(payload: ByteArray) {
+        scheduleTtsFocusTimeout()
         val track = ttsTrack ?: return
         runCatching { track.write(payload, 0, payload.size) }
             .onFailure { Log.w(TAG, "tts write failed: ${it.message}") }
     }
 
+    override fun onTtsEncodedData(payload: ByteArray) {
+        scheduleTtsFocusTimeout()
+        val track = ttsTrack ?: return
+        if (ttsDecoder == null) {
+            ttsDecoder = EncodedAudioDecoder(ttsSampleRate, ttsChannels)
+        }
+        ttsDecoder?.decode(payload) { pcm ->
+            runCatching { track.write(pcm, 0, pcm.size) }
+                .onFailure { Log.w(TAG, "decoded tts write failed: ${it.message}") }
+        }
+    }
+
     override fun onTtsFinished() {
         listener.onDiagnostic("tts finished")
+        cancelTtsFocusTimeout()
         releaseTtsAudio()
         abandonNavigationFocus()
+    }
+
+    private fun scheduleTtsFocusTimeout() {
+        mainHandler.removeCallbacks(ttsFocusTimeout)
+        mainHandler.postDelayed(ttsFocusTimeout, TTS_FOCUS_TIMEOUT_MS)
+    }
+
+    private fun cancelTtsFocusTimeout() {
+        mainHandler.removeCallbacks(ttsFocusTimeout)
     }
 
     private fun createTrack(
@@ -506,10 +649,43 @@ class CarLifeController(
     }
 
     /**
+     * 音乐轨持有 AUDIOFOCUS_GAIN。
+     *
+     * 原实现只给 TTS 申请焦点，媒体轨直接 play()。五菱/小米等车机的厂商音频 policy
+     * 会把没有焦点的媒体流静音，甚至把焦点判给手机的蓝牙通道；表现为"画面正常、
+     * 音乐完全没声"。焦点在音轨销毁或链路断开时释放。
+     */
+    private fun requestMediaFocus() {
+        val manager = audioManager ?: return
+        if (mediaFocus != null) return
+        runCatching {
+            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(
+                    CarLifeAudioRouting.attributes(audioStrategy, CarLifeStream.MEDIA),
+                )
+                .setOnAudioFocusChangeListener(
+                    { change -> Log.i(TAG, "media focus change=$change") },
+                    mainHandler,
+                )
+                .build()
+            mediaFocus = request
+            val result = manager.requestAudioFocus(request)
+            Log.i(TAG, "media focus requested result=$result")
+            listener.onDiagnostic("media focus result=$result")
+        }.onFailure { Log.w(TAG, "media focus failed: ${it.javaClass.simpleName}") }
+    }
+
+    private fun abandonMediaFocus() {
+        val request = mediaFocus ?: return
+        mediaFocus = null
+        runCatching { audioManager?.abandonAudioFocusRequest(request) }
+    }
+
+    /**
      * 导航播报抢一个"可压低别人"的临时焦点。
      *
      * 外挂引擎同样在播报前请求焦点（k7.c），区别只是它按三路 usage 分别请求；
-     * 这里只给 TTS 请求，媒体轨不申请焦点（否则会互相打断）。
+     * 这里媒体轨持有长期 GAIN，TTS 另抢 TRANSIENT_MAY_DUCK，播报结束自动恢复音乐。
      */
     private fun requestNavigationFocus() {
         val manager = audioManager ?: return
@@ -539,20 +715,52 @@ class CarLifeController(
         runCatching { manager.abandonAudioFocusRequest(request) }
     }
 
+    /**
+     * 释放媒体音轨（保留解码器）。
+     *
+     * 音轨与解码器必须分开管：编码音频解码到一半发现参数和音轨不符时，需要只重建音轨
+     * （[rebuildMediaTrack]），如果这里连解码器一起销毁，后续帧就没法再解码了。
+     */
     private fun releaseAudio() {
         audioTrack?.let { track ->
             runCatching { track.pause(); track.flush(); track.stop() }
             runCatching { track.release() }
         }
         audioTrack = null
+        abandonMediaFocus()
+        audioFrames = 0
+        audioBytes = 0L
+    }
+
+    /** 连同解码器一起彻底释放（断链、格式变更等场景）。 */
+    private fun releaseMediaPipeline() {
+        releaseAudio()
+        mediaDecoder?.release()
+        mediaDecoder = null
+    }
+
+    /** 按当前采样率/声道数重建媒体音轨（解码器保持可用）。 */
+    private fun rebuildMediaTrack() {
+        releaseAudio()
+        audioTrack = createTrack(
+            mediaSampleRate,
+            mediaChannels,
+            mediaBits,
+            CarLifeStream.MEDIA,
+            "media",
+        )
+        requestMediaFocus()
     }
 
     private fun releaseTtsAudio() {
+        cancelTtsFocusTimeout()
         ttsTrack?.let { track ->
             runCatching { track.pause(); track.flush(); track.stop() }
             runCatching { track.release() }
         }
         ttsTrack = null
+        ttsDecoder?.release()
+        ttsDecoder = null
     }
 
     override fun onVideoEncoderInfo(info: CarlifeMessages.VideoEncoderInfo) {
@@ -741,6 +949,7 @@ class CarLifeController(
 
     companion object {
         private const val TAG = "CarLifeController"
+        private const val TTS_FOCUS_TIMEOUT_MS = 20_000L
 
         /** 断链后延迟多久主动回连（给手机一点时间释放旧连接）。 */
         private const val RECONNECT_DELAY_MS = 800L

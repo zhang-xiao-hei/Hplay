@@ -74,6 +74,7 @@ object AirPlayPersistence {
     private const val KEY_ADVANCED_MODE = "advanced_mode"
     private const val KEY_PROTOCOL = "protocol"
     private const val KEY_PROTOCOL_CHOSEN = "protocol_chosen"
+    private const val KEY_SETTINGS_PROTOCOL_TAB = "settings_protocol_tab"
     private const val KEY_CONSENT_VERSION = "consent_version"
     private const val KEY_STATUS_RAIL_EDGE = "status_rail_edge"
     private const val KEY_CARLIFE_VIDEO_HEIGHT = "carlife_video_height"
@@ -700,6 +701,22 @@ object AirPlayPersistence {
     fun saveProtocolChosen(context: Context, chosen: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_PROTOCOL_CHOSEN, chosen)
+            .apply()
+    }
+
+    /**
+     * 设置页「通道配置」页签。只决定设置页显示哪一组选项，与真正运行的投屏协议无关。
+     * 以前是纯内存状态，关闭设置页就丢失，用户会以为"通道设置没保存"。
+     */
+    fun loadSettingsProtocolTab(context: Context): Protocol? {
+        val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_SETTINGS_PROTOCOL_TAB, null) ?: return null
+        return Protocol.entries.firstOrNull { it.name == stored }
+    }
+
+    fun saveSettingsProtocolTab(context: Context, protocol: Protocol) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_SETTINGS_PROTOCOL_TAB, protocol.name)
             .apply()
     }
 
