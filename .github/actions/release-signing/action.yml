@@ -1,14 +1,35 @@
 name: Prepare release signing key
 description: >-
-  Rebuild the release keystore from the PEM secrets and export ANDROID_KEYSTORE_PATH for
+  Rebuild the release keystore from the PEM key material and export ANDROID_KEYSTORE_PATH for
   Gradle. The keystore is written by the JDK's own PKCS#12 writer (not by OpenSSL), so it is
-  guaranteed to be readable by keytool and apksigner. When the signing secrets are absent the
+  guaranteed to be readable by keytool and apksigner. When the signing material is absent the
   action warns and exits successfully without producing a keystore, so debug-only builds keep
   working on repositories that carry no release signing material.
 
 inputs:
+  key_pem_base64:
+    description: "Base64 of the PKCS#8 private key PEM."
+    required: false
+    default: ""
+  cert_pem_base64:
+    description: "Base64 of the X.509 certificate PEM."
+    required: false
+    default: ""
+  keystore_password:
+    description: "Password of the generated keystore (also the store password)."
+    required: false
+    default: ""
+  key_alias:
+    description: "Alias of the signing key inside the keystore."
+    required: false
+    default: ""
+  key_password:
+    description: "Password of the private key inside the keystore."
+    required: false
+    default: ""
   required:
-    description: "When 'true', the action fails instead of skipping when the secrets are missing."
+    description: "When 'true', fail instead of skipping when the material is missing."
+    required: false
     default: "false"
 
 outputs:
@@ -23,11 +44,11 @@ runs:
       id: build
       shell: bash
       env:
-        RELEASE_SIGNING_KEY_PEM_BASE64: ${{ secrets.RELEASE_SIGNING_KEY_PEM_BASE64 }}
-        RELEASE_SIGNING_CERT_PEM_BASE64: ${{ secrets.RELEASE_SIGNING_CERT_PEM_BASE64 }}
-        RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
-        ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-        ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        RELEASE_SIGNING_KEY_PEM_BASE64: ${{ inputs.key_pem_base64 }}
+        RELEASE_SIGNING_CERT_PEM_BASE64: ${{ inputs.cert_pem_base64 }}
+        RELEASE_KEYSTORE_PASSWORD: ${{ inputs.keystore_password }}
+        ANDROID_KEY_ALIAS: ${{ inputs.key_alias }}
+        ANDROID_KEY_PASSWORD: ${{ inputs.key_password }}
         SIGNING_REQUIRED: ${{ inputs.required }}
       run: |
         set -euo pipefail
@@ -36,7 +57,7 @@ runs:
         for name in RELEASE_SIGNING_KEY_PEM_BASE64 RELEASE_SIGNING_CERT_PEM_BASE64 \
                     RELEASE_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
           if [[ -z "${!name:-}" ]]; then
-            echo "::warning::GitHub Actions secret ${name} is not configured"
+            echo "::warning::release signing material '${name}' was not provided"
             missing=1
           fi
         done

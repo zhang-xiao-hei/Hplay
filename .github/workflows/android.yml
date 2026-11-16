@@ -42,6 +42,12 @@ jobs:
       - name: Prepare signing key
         id: signing
         uses: ./.github/actions/release-signing
+        with:
+          key_pem_base64: ${{ secrets.RELEASE_SIGNING_KEY_PEM_BASE64 }}
+          cert_pem_base64: ${{ secrets.RELEASE_SIGNING_CERT_PEM_BASE64 }}
+          keystore_password: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          key_alias: ${{ secrets.ANDROID_KEY_ALIAS }}
+          key_password: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
       - name: Prepare built-in MFi credentials
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -150,6 +156,13 @@ jobs:
       - name: Prepare signing key
         id: signing
         uses: ./.github/actions/release-signing
+        with:
+          key_pem_base64: ${{ secrets.RELEASE_SIGNING_KEY_PEM_BASE64 }}
+          cert_pem_base64: ${{ secrets.RELEASE_SIGNING_CERT_PEM_BASE64 }}
+          keystore_password: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          key_alias: ${{ secrets.ANDROID_KEY_ALIAS }}
+          key_password: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          required: true
 
       - name: Prepare built-in MFi credentials
         env:
