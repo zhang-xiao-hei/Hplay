@@ -40,29 +40,8 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Prepare signing key
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        env:
-          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-
-          for name in RELEASE_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
-            if [[ -z "${!name:-}" ]]; then
-              echo "Missing required GitHub Actions secret for ${name}" >&2
-              exit 1
-            fi
-          done
-
-          keystore_path="${RUNNER_TEMP}/hplay-release.jks"
-          printf '%s' "${RELEASE_KEYSTORE_BASE64}" | base64 --decode > "${keystore_path}"
-          keytool -list \
-            -keystore "${keystore_path}" \
-            -storepass "${ANDROID_KEYSTORE_PASSWORD}" \
-            -alias "${ANDROID_KEY_ALIAS}" >/dev/null
-          echo "ANDROID_KEYSTORE_PATH=${keystore_path}" >> "${GITHUB_ENV}"
+        id: signing
+        uses: ./.github/actions/release-signing
 
       - name: Prepare built-in MFi credentials
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -77,12 +56,14 @@ jobs:
           # built-in MFi target does not abort at startup. Without this a fresh checkout (CI)
           # produces an APK that crashes immediately with "Built-in MFi certificate ... must be
           # supplied for the built-in target".
-          for name in MFI_CERTIFICATE_P7B_BASE64 MFI_IDENTITY_PK8_BASE64; do
-            if [[ -z "${!name:-}" ]]; then
-              echo "Missing required GitHub Actions secret for ${name}" >&2
-              exit 1
-            fi
-          done
+          # That credential is an Apple-issued identity and cannot be synthesised, so a build
+          # without it is still a valid build: CarPlay's built-in target reports the credential
+          # as missing (CarPlayHostActivity.validateMfiSettings warns instead of blocking) and
+          # the CarLink channel is unaffected. Treat the two secrets as optional.
+          if [[ -z "${MFI_CERTIFICATE_P7B_BASE64:-}" || -z "${MFI_IDENTITY_PK8_BASE64:-}" ]]; then
+            echo "::warning::built-in MFi credentials are not configured; the APK will ship without them"
+            exit 0
+          fi
           mkdir -p shared/src/main/assets/offline-mfi
           printf '%s' "${MFI_CERTIFICATE_P7B_BASE64}" | base64 --decode > shared/src/main/assets/offline-mfi/certificate.p7b
           printf '%s' "${MFI_IDENTITY_PK8_BASE64}" | base64 --decode > shared/src/main/assets/offline-mfi/identity.pk8
@@ -93,8 +74,8 @@ jobs:
       - name: Test, lint, and build dev APKs
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: >-
           ./gradlew
           :shared:testDebugUnitTest
@@ -107,10 +88,10 @@ jobs:
           --stacktrace
 
       - name: Verify signed debug APKs
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: steps.signing.outputs.prepared == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
           set -euo pipefail
 
@@ -167,28 +148,8 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Prepare signing key
-        env:
-          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-
-          for name in RELEASE_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
-            if [[ -z "${!name:-}" ]]; then
-              echo "Missing required GitHub Actions secret for ${name}" >&2
-              exit 1
-            fi
-          done
-
-          keystore_path="${RUNNER_TEMP}/hplay-release.jks"
-          printf '%s' "${RELEASE_KEYSTORE_BASE64}" | base64 --decode > "${keystore_path}"
-          keytool -list \
-            -keystore "${keystore_path}" \
-            -storepass "${ANDROID_KEYSTORE_PASSWORD}" \
-            -alias "${ANDROID_KEY_ALIAS}" >/dev/null
-          echo "ANDROID_KEYSTORE_PATH=${keystore_path}" >> "${GITHUB_ENV}"
+        id: signing
+        uses: ./.github/actions/release-signing
 
       - name: Prepare built-in MFi credentials
         env:
@@ -202,12 +163,14 @@ jobs:
           # built-in MFi target does not abort at startup. Without this a fresh checkout (CI)
           # produces an APK that crashes immediately with "Built-in MFi certificate ... must be
           # supplied for the built-in target".
-          for name in MFI_CERTIFICATE_P7B_BASE64 MFI_IDENTITY_PK8_BASE64; do
-            if [[ -z "${!name:-}" ]]; then
-              echo "Missing required GitHub Actions secret for ${name}" >&2
-              exit 1
-            fi
-          done
+          # That credential is an Apple-issued identity and cannot be synthesised, so a build
+          # without it is still a valid build: CarPlay's built-in target reports the credential
+          # as missing (CarPlayHostActivity.validateMfiSettings warns instead of blocking) and
+          # the CarLink channel is unaffected. Treat the two secrets as optional.
+          if [[ -z "${MFI_CERTIFICATE_P7B_BASE64:-}" || -z "${MFI_IDENTITY_PK8_BASE64:-}" ]]; then
+            echo "::warning::built-in MFi credentials are not configured; the APK will ship without them"
+            exit 0
+          fi
           mkdir -p shared/src/main/assets/offline-mfi
           printf '%s' "${MFI_CERTIFICATE_P7B_BASE64}" | base64 --decode > shared/src/main/assets/offline-mfi/certificate.p7b
           printf '%s' "${MFI_IDENTITY_PK8_BASE64}" | base64 --decode > shared/src/main/assets/offline-mfi/identity.pk8
@@ -218,8 +181,8 @@ jobs:
       - name: Test, lint, and build signed release APKs
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: >-
           ./gradlew
           :shared:testDebugUnitTest
@@ -234,6 +197,13 @@ jobs:
       - name: Verify and collect signed APKs
         run: |
           set -euo pipefail
+
+          # A release APK that is not signed cannot be installed, so refuse to publish one
+          # instead of silently shipping something the user cannot sideload.
+          if [[ -z "${ANDROID_KEYSTORE_PATH:-}" ]]; then
+            echo "Release APKs must be signed, but no release signing material was available" >&2
+            exit 1
+          fi
 
           mkdir -p release
           safe_tag="${GITHUB_REF_NAME//\//-}"

@@ -68,6 +68,15 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
     @Volatile private var pairingCode: String = ""
 
     /**
+     * 车机本地生成的 6 位配对码（进页面时生成并显示，等用户在手机弹窗里输入）。
+     *
+     * 单独留一份，是因为手机经 BLE 回传的口令**未必**等于车机本地生成的那一个——用户可能输入的是
+     * 屏幕上最初显示的码，而手机回传的是它自己生成的另一个值。两个都作为 AUTH 候选（见
+     * [authPinCandidates]），轮换命中即可，避免"手机算的密钥和车机算的不是同一个"导致握手失败。
+     */
+    @Volatile private var initialPairingCode: String = ""
+
+    /**
      * 承载方式：
      *  - [MODE_AP]  车机开热点（LocalOnlyHotspot），手机加入车机热点后连车机 AP IP；
      *  - [MODE_LAN] 局域网直连——车机沿用「已连接的 WiFi」（如 UFI-8C4D），手机也连同一个 WiFi，
@@ -111,9 +120,10 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
                 android.content.res.Configuration.UI_MODE_NIGHT_YES,
         )
 
-        // ICCOA 的连接码是「车机屏幕显示、手机弹窗里输入」：车机自己生成 6 位数字并显示，
-        // 不能用手机下发的值当显示值（否则手机弹窗要码时车机上只有占位符）。
-        pairingCode = generatePairingCode()
+        // ICCOA 的连接码是「车机屏幕显示、手机弹窗里输入」：车机自己生成 6 位数字并显示。
+        // 手机若经 BLE 下发了自己的配对码，后面 onClientInfo 会覆盖它（两个值都会作为 AUTH 候选）。
+        initialPairingCode = generatePairingCode()
+        pairingCode = initialPairingCode
 
         // 默认用「热点」模式：实测小米 ICCOA 车联在 type=1002 下是「断开当前 WiFi → 连车机热点」，
         // 不支持「双方连同一 WiFi 直连」。单射频车机开热点前会先断开 STA，热点起来后再连回。
@@ -274,9 +284,11 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
         val ctrl = CarlinkController(
             this,
             config,
-            // PIN = 屏幕显示的 6 位「手机配对码」，供 AUTH 的 authPkHmac/agreementPkSig 使用
-            //（ICCOA 认证口令；与 WiFi 热点密码无关，热点密码仅用于手机连 WiFi）。
-            pinProvider = { pairingCode.ifEmpty { null } },
+            // AUTH 口令候选（按优先级）：① 手机经 BLE 下发的配对码 → ② 车机本地生成的配对码
+            // → ③ 与手机共享的 WiFi 密码（热点 PSK / 局域网 WiFi 密码）。
+            // 各家 ICCOA 实现的密钥口径并不统一，车机无法预先得知手机用哪一个，
+            // 所以给出一串候选，由连接层轮换使用、命中即锁定。
+            pinCandidates = { authPinCandidates() },
             listener = object : CarlinkController.Listener {
                 override fun onStatus(state: String, detail: String) {
                     Log.i(tag, "[$state] $detail")
@@ -289,9 +301,8 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
 
         tv.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
             override fun onSurfaceTextureAvailable(st: android.graphics.SurfaceTexture, w: Int, h: Int) {
-                Log.i(tag, "TextureView available ${w}x$h -> attach + start")
+                Log.i(tag, "TextureView available ${w}x$h -> attach surface")
                 ctrl.attachSurface(android.view.Surface(st))
-                ctrl.start()
             }
 
             override fun onSurfaceTextureSizeChanged(st: android.graphics.SurfaceTexture, w: Int, h: Int) {}
@@ -302,6 +313,12 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
 
             override fun onSurfaceTextureUpdated(st: android.graphics.SurfaceTexture) {}
         }
+
+        // 连接层（AUTH/CONTROL/SENSOR/MEDIA/CERT/VIDEO 六个端口的监听）必须独立于画面存在。
+        // 手机的顺序是"发现车机 → 连 AUTH 完成握手 → 最后才有视频"；若把端口监听绑在
+        // onSurfaceTextureAvailable 上，Surface 未就绪或重建期间车机就是一个死端口，
+        // 手机连多少次都连不上——这正是"CarLink 连不上"的一条真实根因。
+        ctrl.start()
 
         // 视频就绪回调：显示画面、隐藏等待卡片。
         ctrl.videoSink.onVideoStarted = {
@@ -489,7 +506,8 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
                     "BLE ClientInfo: id=${info.id} name=${info.name} type=${info.type} " +
                         "pinCodeOrAuthentication=${info.pinCodeOrAuthentication}",
                 )
-                // 6 位配对码由手机下发：把它显示到屏幕，并作为 AUTH 认证口令（pinProvider 读 pairingCode）。
+                // 手机经 BLE 下发自己的配对码：把它显示到屏幕，并作为 AUTH 口令候选之一
+                //（见 authPinCandidates）。车机本地生成的那份仍然保留为另一个候选。
                 val code = info.pinCodeOrAuthentication?.trim()
                 if (!code.isNullOrEmpty() && code != pairingCode) {
                     Log.w(tag, "PIN from phone ($code) differs from screen code ($pairingCode)")
@@ -730,6 +748,35 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
         )
         finish()
+    }
+
+    /**
+     * AUTH 握手可用的口令候选（按优先级排列）。
+     *
+     * 手机与车机必须用**同一个**密钥算 `authPkHmac`，但 ICCOA 各家实现的口径并不统一：
+     *  - 有的把**手机自己生成的配对码**经 BLE `ClientInfo.pinCodeOrAuthentication` 写给车机；
+     *  - 有的直接用**双方共享的 WiFi 密码**（车机热点的 PSK / 局域网的 WiFi 密码）。
+     *
+     * 车机无法预先知道手机选的是哪一个，与其猜死一个（猜错就永远握手失败），不如把已知的三种
+     * 都交上去，由 [com.hpplay.carlink.conn.CarlinkConnection] 轮换尝试、命中即锁定。
+     */
+    private fun authPinCandidates(): List<String> {
+        val out = LinkedHashSet<String>()
+        pairingCode.takeIf { it.isNotBlank() }?.let { out.add(it.trim()) }
+        initialPairingCode.takeIf { it.isNotBlank() }?.let { out.add(it.trim()) }
+        authWifiSecret()?.takeIf { it.isNotBlank() }?.let { out.add(it.trim()) }
+        return out.toList()
+    }
+
+    /**
+     * 当前承载方式下与手机共享的 WiFi 密码：
+     *  - 热点模式：车机自己开的热点的 PSK（手机用它连车机热点，ServerInfo.psk 就是它）；
+     *  - 局域网直连：车机当前连接的 WiFi 密码（手机连同一个 WiFi）。
+     */
+    private fun authWifiSecret(): String? = when (connectionMode) {
+        MODE_AP -> hotspotInfo?.passphrase
+        MODE_LAN -> lanPsk
+        else -> null
     }
 
     private fun showConnectionInfo() {

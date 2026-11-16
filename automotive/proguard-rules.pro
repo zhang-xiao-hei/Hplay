@@ -20,3 +20,12 @@
     public static **[] values();
     public static ** valueOf(java.lang.String);
 }
+
+# libovmsink.so (CarLink WFD sink) resolves its JNI bindings by HARDCODED class name
+# "com/ucarsink/sink/natives/SinkNative" via RegisterNatives, and calls back into the
+# static onNative* methods by name. Any rename breaks JNI_OnLoad -> crash. Keep it whole.
+# This module depends on :carlink, so it needs the same rule as :mobile.
+-keep class com.ucarsink.sink.natives.** { *; }
+
+# CarLink protobuf-lite generated classes are accessed reflectively.
+-keep class com.ucar.databus.proto.** { *; }

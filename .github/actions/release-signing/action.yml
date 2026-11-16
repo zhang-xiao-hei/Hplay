@@ -1,0 +1,123 @@
+name: Prepare release signing key
+description: >-
+  Rebuild the release keystore from the PEM secrets and export ANDROID_KEYSTORE_PATH for
+  Gradle. The keystore is written by the JDK's own PKCS#12 writer (not by OpenSSL), so it is
+  guaranteed to be readable by keytool and apksigner. When the signing secrets are absent the
+  action warns and exits successfully without producing a keystore, so debug-only builds keep
+  working on repositories that carry no release signing material.
+
+inputs:
+  required:
+    description: "When 'true', the action fails instead of skipping when the secrets are missing."
+    default: "false"
+
+outputs:
+  prepared:
+    description: "'true' when a keystore was built and ANDROID_KEYSTORE_PATH was exported."
+    value: ${{ steps.build.outputs.prepared }}
+
+runs:
+  using: composite
+  steps:
+    - name: Rebuild keystore from the PEM secrets
+      id: build
+      shell: bash
+      env:
+        RELEASE_SIGNING_KEY_PEM_BASE64: ${{ secrets.RELEASE_SIGNING_KEY_PEM_BASE64 }}
+        RELEASE_SIGNING_CERT_PEM_BASE64: ${{ secrets.RELEASE_SIGNING_CERT_PEM_BASE64 }}
+        RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+        ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        SIGNING_REQUIRED: ${{ inputs.required }}
+      run: |
+        set -euo pipefail
+
+        missing=0
+        for name in RELEASE_SIGNING_KEY_PEM_BASE64 RELEASE_SIGNING_CERT_PEM_BASE64 \
+                    RELEASE_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+          if [[ -z "${!name:-}" ]]; then
+            echo "::warning::GitHub Actions secret ${name} is not configured"
+            missing=1
+          fi
+        done
+        if [[ "${missing}" != "0" ]]; then
+          if [[ "${SIGNING_REQUIRED}" == "true" ]]; then
+            echo "Required signing material is missing" >&2
+            exit 1
+          fi
+          echo "::notice::building without release signing material (unsigned release / debug-signed debug)"
+          echo "prepared=false" >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+
+        work="${RUNNER_TEMP}/hplay-signing"
+        mkdir -p "${work}"
+        printf '%s' "${RELEASE_SIGNING_KEY_PEM_BASE64}" | base64 --decode > "${work}/key.pem"
+        printf '%s' "${RELEASE_SIGNING_CERT_PEM_BASE64}" | base64 --decode > "${work}/cert.pem"
+
+        # The keystore is produced by the JDK's own PKCS#12 writer rather than by OpenSSL:
+        # OpenSSL and Java disagree on the default protection algorithms, and a keystore that
+        # openssl accepts is not guaranteed to open in keytool / apksigner.
+        cat > "${work}/BuildKeystore.java" <<'JAVA'
+        import java.io.ByteArrayInputStream;
+        import java.io.InputStream;
+        import java.io.OutputStream;
+        import java.nio.charset.StandardCharsets;
+        import java.nio.file.Files;
+        import java.nio.file.Path;
+        import java.security.KeyFactory;
+        import java.security.KeyStore;
+        import java.security.PrivateKey;
+        import java.security.cert.Certificate;
+        import java.security.cert.CertificateFactory;
+        import java.security.spec.PKCS8EncodedKeySpec;
+        import java.util.Base64;
+
+        public class BuildKeystore {
+            public static void main(String[] args) throws Exception {
+                String keyPem = Files.readString(Path.of(args[0]));
+                String certPem = Files.readString(Path.of(args[1]));
+                String outPath = args[2];
+                String alias = args[3];
+                char[] storePass = args[4].toCharArray();
+                char[] keyPass = args[5].toCharArray();
+
+                String base64 = keyPem.replaceAll("-----[A-Z ]+-----", "").replaceAll("\\s", "");
+                byte[] der = Base64.getDecoder().decode(base64);
+                PrivateKey privateKey =
+                        KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(der));
+
+                Certificate certificate;
+                try (InputStream in = new ByteArrayInputStream(certPem.getBytes(StandardCharsets.UTF_8))) {
+                    certificate = CertificateFactory.getInstance("X.509").generateCertificate(in);
+                }
+
+                KeyStore keystore = KeyStore.getInstance("PKCS12");
+                keystore.load(null, storePass);
+                keystore.setKeyEntry(alias, privateKey, keyPass, new Certificate[]{certificate});
+                try (OutputStream out = Files.newOutputStream(Path.of(outPath))) {
+                    keystore.store(out, storePass);
+                }
+                System.out.println("keystore written: " + outPath);
+            }
+        }
+        JAVA
+
+        java "${work}/BuildKeystore.java" \
+          "${work}/key.pem" \
+          "${work}/cert.pem" \
+          "${work}/hplay-release.p12" \
+          "${ANDROID_KEY_ALIAS}" \
+          "${RELEASE_KEYSTORE_PASSWORD}" \
+          "${ANDROID_KEY_PASSWORD}"
+
+        # Fail loudly here rather than at the apksigner step: a keystore the JDK cannot open is
+        # always a packaging problem, not a signing problem.
+        keytool -list \
+          -keystore "${work}/hplay-release.p12" \
+          -storepass "${RELEASE_KEYSTORE_PASSWORD}" \
+          -alias "${ANDROID_KEY_ALIAS}" > /dev/null
+
+        echo "ANDROID_KEYSTORE_PATH=${work}/hplay-release.p12" >> "${GITHUB_ENV}"
+        echo "prepared=true" >> "${GITHUB_OUTPUT}"
+        echo "release keystore rebuilt and verified (alias=${ANDROID_KEY_ALIAS})"

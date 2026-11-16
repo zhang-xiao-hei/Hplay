@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       variant:
-        description: "debug = installable; release = unsigned"
+        description: "debug = installable; release = R8-shrunk signed release build"
         required: true
         default: "debug"
         type: choice
@@ -53,6 +53,10 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare signing key
+        id: signing
+        uses: ./.github/actions/release-signing
 
       - name: Run unit tests
         run: |
@@ -113,7 +117,13 @@ jobs:
           version="$(grep -E '^hplay\.versionName=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')"
           vcode="$(grep -E '^hplay\.versionCode=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')"
           short_sha="${GITHUB_SHA:0:7}"
-          notes="Version ${version} (versionCode ${vcode}), built from commit ${short_sha}. The debug APK is signed with the debug key and can be installed directly. MFi credentials are NOT included."
+          variant="${{ inputs.variant || 'debug' }}"
+          if [ "$variant" = "release" ]; then
+            kind="release build (R8 shrunk + obfuscated)"
+          else
+            kind="debug build"
+          fi
+          notes="Version ${version} (versionCode ${vcode}), ${kind}, built from commit ${short_sha}. Signed with the Hplay release key, so it installs directly and upgrades over previous versions. MFi credentials are NOT included: CarPlay's built-in MFi target reports the credential as missing, while the CarLink and CarLife channels are unaffected."
 
           # 1) 先按版本号建一个永久 tag，把这一版的历史留住。
           #    少了它的话，apk-latest 被覆盖后旧版本的 APK 就再也找不回来了。

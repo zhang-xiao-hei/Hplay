@@ -23,8 +23,11 @@ import java.net.Socket
  */
 class CarlinkConnection(
     private val config: CarlinkControl.CarConfig,
-    /** 提供当前热点密码（PIN），用于 AUTH 的 authPkHmac/agreementPkSig；null 表示暂不可用。 */
-    private val pinProvider: () -> String? = { null },
+    /**
+     * 提供 AUTH 握手可用的**候选**口令（按优先级排列）：手机经 BLE 下发的配对码、车机本地
+     * 生成的配对码、与手机共享的 WiFi 密码。返回空列表表示暂不可用。
+     */
+    private val pinCandidates: () -> List<String> = { emptyList() },
     private val listener: Listener,
 ) {
     interface Listener {
@@ -49,6 +52,34 @@ class CarlinkConnection(
     private val extraChannels = mutableListOf<CarlinkChannel>()
     @Volatile private var sessionKey: ByteArray? = null
     @Volatile private var uibcSessionKey: ByteArray? = null
+
+    /**
+     * AUTH 口令的候选轮换游标。
+     *
+     * 手机与车机必须用**同一个**密钥算 authPkHmac，但 ICCOA 各家实现的口径并不统一：
+     *  - 有的把手机自己生成的配对码通过 BLE `ClientInfo.pinCodeOrAuthentication` 写给车机；
+     *  - 有的直接用双方共享的 WiFi 密码（热点 PSK / 局域网 WiFi 密码）。
+     * 车机无法预先知道手机选的是哪一个，与其猜，不如**轮着试**：每次 AUTH 握手换一个候选，
+     * 一旦某个候选被手机接受（收到 AuthConfirm）就把它锁定，后续握手一直用它。
+     */
+    private val pinCursor = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** 已经被手机接受过的口令；命中后不再轮换。 */
+    @Volatile private var pinnedPin: String? = null
+
+    /** 取出本次 AUTH 握手要用的候选口令。 */
+    private fun nextPin(): String? {
+        pinnedPin?.let { return it }
+        val list = pinCandidates()
+            .map { it.trim() }
+            .filter { it.length >= CarlinkAuth.MIN_PIN_LENGTH }
+            .distinct()
+        if (list.isEmpty()) return null
+        val index = pinCursor.getAndIncrement()
+        val chosen = list[index % list.size]
+        Log.i(tag, "AUTH candidate #$index used (len=${chosen.length}, pool=${list.size})")
+        return chosen
+    }
 
     /** 发送加密闭包：逐帧动态读取当前 sessionKey；key 未就绪时原样透传（握手前帧）。 */
     private fun encryptor(): (ByteArray) -> ByteArray = { body ->
@@ -121,10 +152,15 @@ class CarlinkConnection(
         listener.onState(State.AUTHENTICATING, "手机已连入 AUTH，握手进行中…")
         val a = CarlinkAuth(
             socket,
-            pinProvider = pinProvider,
+            pinProvider = ::nextPin,
             onHandshakeDone = { result ->
                 sessionKey = result.sessionKey
                 uibcSessionKey = result.uibcSessionKey
+                // 手机认了这个候选 → 锁定它，后续握手不再轮换。
+                auth?.pinUsed?.let { hit ->
+                    pinnedPin = hit
+                    Log.i(tag, "AUTH credential accepted and pinned (len=${hit.length})")
+                }
                 listener.onState(State.CONNECTED, "认证完成，手机IP=${result.phoneIp}")
                 listener.onAuthDone(result.phoneIp, result.phoneModel, result.workModes)
             },
@@ -142,7 +178,12 @@ class CarlinkConnection(
             config,
             onDisconnect = {
                 listener.onDisconnected()
-                stop()
+                // 只关掉 CONTROL 这一条通道，**不**停掉整个监听层。
+                //
+                // 以前这里调 stop()，会把 AUTH/CONTROL/SENSOR/MEDIA/CERT/VIDEO 六个
+                // ServerSocket 全部关掉。表现是「第一次连得上，之后手机再连就永远失败」——
+                // 因为已经没有端口在监听了，而页面还停在等待状态，用户看不出发生了什么。
+                // 手机断开后应当保持监听，等它下一次连进来。
             },
             encrypt = encryptor(),
             decrypt = decryptor(),
@@ -203,6 +244,8 @@ class CarlinkConnection(
         mediaServer = null; certServer = null; videoServer = null
         auth = null; control = null
         sessionKey = null; uibcSessionKey = null
+        // 承载方式可能已经变了（热点 ↔ 局域网），旧的候选口令不再可靠，重新轮换。
+        pinnedPin = null
         listener.onState(State.IDLE, "已停止监听")
     }
 }

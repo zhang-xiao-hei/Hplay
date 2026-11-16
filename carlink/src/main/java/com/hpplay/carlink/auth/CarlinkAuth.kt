@@ -26,11 +26,16 @@ import java.security.Signature
  *  4. 手机回 AuthConfirm（用 session_key 以 pgy 分帧 GCM 加密的本地 IP），车机解密得手机 IP。
  *
  * PIN 用于 authPkHmac/agreementPkSig，向手机证明"车机知道当前热点密码"，防中间人；
- * AP 模式下 PIN = 热点密码（与 ServerInfo.psk 一致）。若暂无 PIN（如热点未就绪）则降级为空字段。
+ * AP 模式下最常见的口径就是热点密码（与 ServerInfo.psk 一致）。
+ *
+ * 但"手机用哪个密钥算 HMAC"在不同 ICCOA 实现里并不统一：有的把**手机自己生成的配对码**
+ * 通过 BLE ClientInfo.pinCodeOrAuthentication 写给车机，有的直接用**WiFi PSK**。车机无法预先
+ * 得知手机选的是哪一个，所以这里不猜——由 [pinProvider] 逐次给出候选（本类只负责按当次拿到的
+ * 候选计算），轮换与"命中即锁定"由上层 [com.hpplay.carlink.conn.CarlinkConnection] 完成。
  */
 class CarlinkAuth(
     private val socket: Socket,
-    /** 提供当前热点密码（PIN）；返回 null 表示暂不可用。 */
+    /** 提供本次 AUTH 握手使用的 PIN；返回 null 表示暂不可用。 */
     private val pinProvider: () -> String?,
     private val onHandshakeDone: (AuthResult) -> Unit,
     private val onError: (Throwable) -> Unit,
@@ -43,6 +48,10 @@ class CarlinkAuth(
         val phoneModel: String,
         val workModes: Int,
     )
+
+    /** 本次握手实际使用的 PIN（上层据此把"命中"的候选锁定下来）。 */
+    @Volatile var pinUsed: String? = null
+        private set
 
     private val tag = "CarlinkAuth"
     private var channel: CarlinkChannel? = null
@@ -113,8 +122,11 @@ class CarlinkAuth(
         val authPkBytes = CarlinkCrypto.encodePublicKey(authKeyPair.public)
         val agreementPkBytes = CarlinkCrypto.encodePublicKey(agreementKeyPair.public)
 
-        val pin = pinProvider()?.toByteArray(Charsets.UTF_8)
-        val pinOk = pin != null && pin.size >= 6
+        // 本次使用的 PIN 由上层轮换给出（不同 ICCOA 实现的密钥口径并不一致，见类注释）。
+        val pinText = pinProvider()?.trim()?.takeIf { it.length >= MIN_PIN_LENGTH }
+        pinUsed = pinText
+        val pin = pinText?.toByteArray(Charsets.UTF_8)
+        val pinOk = pin != null
 
         // authPkHmac = HMAC-SHA256(SHA256(Nb‖PIN), authPkBytes)
         val authPkHmac: ByteArray = if (pinOk) {
@@ -147,7 +159,7 @@ class CarlinkAuth(
         channel?.send(ChannelCategory.AUTH, 2, out, MsgType.RES)
         Log.i(
             tag,
-            "AuthResponse sent (result=$RESULT_OK, pinUsed=$pinOk, " +
+            "AuthResponse sent (result=$RESULT_OK, pinUsed=$pinOk(len=${pinText?.length ?: 0}), " +
                 "authPkHmac=${authPkHmac.size}B, agreementPkSig=${agreementPkSig.size}B)",
         )
     }
@@ -199,6 +211,10 @@ class CarlinkAuth(
         const val PROTOCOL_VERSION = 1793 // 0x0701，蒲公英 AuthResponse.version
         const val RESULT_OK = 0
         const val DAY_MODE = 1
+
+        /** 低于这个长度的"口令"视为没有口令（宁可降级为空字段，也不拿垃圾值算 HMAC）。 */
+        const val MIN_PIN_LENGTH = 4
+
         // 屏幕信息格式 w_h_dpi_sww_swh（由宿主在 setScreenInfo 时覆盖）
         @Volatile var screenInfo: String = "1280_720_240_1280_720"
     }

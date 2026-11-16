@@ -39,6 +39,15 @@ android {
             // vars. The placeholder is only reached when neither exists, and in
             // that case this config is never attached to a build type.
             storeFile = rootProject.file(releaseStorePath ?: "missing-release-keystore.jks")
+            // The keystore format follows the file extension: CI rebuilds a PKCS#12 file
+            // (hplay-release.p12) with the JDK's own writer, while a hand-made keystore from
+            // an older keytool is a JKS. The JDK default is PKCS#12, so anything that is not
+            // explicitly .jks is read as PKCS#12.
+            storeType = if (releaseStorePath?.endsWith(".jks", ignoreCase = true) == true) {
+                "jks"
+            } else {
+                "pkcs12"
+            }
             storePassword = signingValue("storePassword", "ANDROID_KEYSTORE_PASSWORD")
             keyAlias = signingValue("keyAlias", "ANDROID_KEY_ALIAS")
             keyPassword = signingValue("keyPassword", "ANDROID_KEY_PASSWORD")

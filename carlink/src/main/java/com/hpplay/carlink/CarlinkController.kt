@@ -18,8 +18,13 @@ import com.ucarsink.sink.natives.SinkNative
 class CarlinkController(
     private val context: Context,
     private val config: CarlinkControl.CarConfig,
-    /** 提供当前热点密码（PIN），用于 AUTH 证明车机知道热点密码。 */
-    private val pinProvider: () -> String? = { null },
+    /**
+     * 提供 AUTH 握手可用的**候选**口令（按优先级排列）。
+     *
+     * 手机与车机必须用同一个密钥算 authPkHmac，但 ICCOA 各家实现的口径不统一（手机下发的
+     * 配对码 vs 双方共享的 WiFi 密码），所以这里给出一串候选，由 [CarlinkConnection] 轮换使用。
+     */
+    private val pinCandidates: () -> List<String> = { emptyList() },
     private val listener: Listener,
 ) {
     interface Listener {
@@ -33,17 +38,34 @@ class CarlinkController(
     @Volatile private var started = false
     private var surface: Surface? = null
 
+    /**
+     * 挂载画面用的 Surface（可以随时为 null）。
+     *
+     * 与 [start] 分开：连接层（TCP 端口监听）必须**独立于**画面存在 ——
+     * 手机是先发现车机、再连 AUTH 端口完成握手，最后才有视频。如果把端口监听绑在
+     * "Surface 就绪"上，那么 Surface 没回调（或重建期间）时车机就是一个死端口，
+     * 手机连多少次都连不上。
+     */
     fun attachSurface(s: Surface?) {
         surface = s
         videoSink.attachSurface(s)
     }
 
+    /**
+     * 启动连接层（监听 AUTH/CONTROL/... 六个端口）与视频 sink。
+     *
+     * 幂等：重复调用不会重复绑定端口。
+     */
     fun start() {
         if (started) return
         started = true
-        SinkNative.registerListener(videoSink)
-        videoSink.setLowLatency(config.supportLowLatency)
-        val conn = CarlinkConnection(config, pinProvider, object : CarlinkConnection.Listener {
+        // Native sink 的初始化是"尽力而为"：它失败不应该连累 TCP 监听层，
+        // 否则手机连不上、用户只看到"一直等待"，连日志都指向错误的方向。
+        runCatching {
+            SinkNative.registerListener(videoSink)
+            videoSink.setLowLatency(config.supportLowLatency)
+        }.onFailure { Log.e(tag, "video sink init failed", it) }
+        val conn = CarlinkConnection(config, pinCandidates, object : CarlinkConnection.Listener {
             override fun onState(state: CarlinkConnection.State, detail: String) {
                 Log.i(tag, "conn state=$state $detail")
                 listener.onStatus(state.name, detail)
