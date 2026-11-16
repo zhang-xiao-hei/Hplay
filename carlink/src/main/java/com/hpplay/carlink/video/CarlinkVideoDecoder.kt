@@ -78,7 +78,7 @@ class CarlinkVideoDecoder(
      * picture comes back immediately.
      */
     @Synchronized
-    fun detachSurface(surface: Surface?) {
+    fun detachSurface() {
         if (codec == null || !configured) {
             // Nothing to preserve.
             release()
