@@ -1,5 +1,6 @@
 package com.hpplay.media
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
@@ -1496,6 +1497,9 @@ private class CarPlayAudioFocus(context: Context) {
     fun acquire() = requestFocus()
 
     /** Abandons focus and forgets every track; used when the session tears down. */
+    // AudioFocusRequest is API 26; a request cannot exist below that, so this branch is
+    // unreachable on older devices even though the call itself is unguarded.
+    @SuppressLint("NewApi")
     fun release() {
         synchronized(lock) { listeners.keys.toList() }.forEach(::detach)
         val manager = audioManager ?: return
