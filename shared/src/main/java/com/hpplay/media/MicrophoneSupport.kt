@@ -207,6 +207,9 @@ class MicrophoneLevelMonitor(
         }
     }
 
+    // RECORD_AUDIO is a runtime permission; the host activity asks for it before a session
+    // starts and a refusal surfaces as the catch below, so there is nothing to check here.
+    @SuppressLint("MissingPermission")
     private fun capture() {
         var failure: Throwable? = null
         var audioModeLease: Closeable? = null
