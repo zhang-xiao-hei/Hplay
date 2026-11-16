@@ -349,6 +349,8 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
     private var disconnectedSettingsButton: View? = null
     /** Top-right "switch protocol" pill — kept only while disconnected (hidden once CarPlay is linked). */
     private var switchProtocolButton: TextView? = null
+    /** Top-left "exit" link — shown once the phone is linked so the user can leave the cast screen. */
+    private var exitLinkButton: TextView? = null
     private var settingsMenu: View? = null
     private var settingsRoot: FrameLayout? = null
     private var settingsCategorySelector: ((Int) -> Unit)? = null
@@ -956,6 +958,8 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
         wirelessPermissionsReady = !wirelessEnabled || hasRequiredWirelessPermissions()
         maybeStartCarPlay()
         applyFullscreenMode()
+        // 切回前台：Surface 被销毁重建后解码器要重新拿关键帧，主动向手机要一次。
+        resumeVideoPipeline()
         // A resumed host means the wake already reached us; no need for the keeper to nudge again.
         startupKeeperRequested = false
     }
@@ -1298,6 +1302,33 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
             ).apply { topMargin = dp(14); marginEnd = dp(16) },
         )
         this.switchProtocolButton = switchProtocolButton
+        // 左上角「退出」链接：连接成功后出现，点击断开投屏并回到协议选择页。
+        val exitLink = TextView(this).apply {
+            text = getString(R.string.cast_exit_link)
+            setTextColor(palette.text)
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(20), dp(10), dp(20), dp(10))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(999).toFloat()
+                setColor(palette.surfaceElevated)
+                setStroke(dp(1), palette.cardBorder)
+            }
+            isClickable = true
+            isFocusable = true
+            contentDescription = getString(R.string.cast_exit_hint)
+            setOnClickListener { exitProjection() }
+            visibility = View.GONE
+        }
+        root.addView(
+            exitLink,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.START,
+            ).apply { topMargin = dp(14); marginStart = dp(16) },
+        )
+        this.exitLinkButton = exitLink
         val videoOverlay = CarPlayVideoView(this).apply {
             visibility = View.GONE
             layoutParams = FrameLayout.LayoutParams(
@@ -6446,6 +6477,15 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
                 setMargins(dp(12) + left, dp(12) + top, dp(12), 0)
             }
         }
+        exitLinkButton?.let { link ->
+            link.layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.START,
+            ).apply {
+                setMargins(dp(16) + left, dp(14) + top, 0, 0)
+            }
+        }
     }
 
     private fun refreshDisplaySizeAfterLayout() {
@@ -7054,6 +7094,24 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
         shutdown(terminateProcess = true, reason = "settings exit application")
     }
 
+    /**
+     * 断开当前投屏并回到协议选择页。
+     *
+     * 用户在连接成功后从左上角的「退出」链接触发：把整条 CarPlay 链路拆干净（避免
+     * StartupKeeperService 又把宿主拉起来重连），然后跳到协议选择页让用户换协议或重新连接。
+     */
+    private fun exitProjection() {
+        if (shuttingDown.get()) return
+        appendLog("exit projection requested from the top-left link")
+        // 断开链路并停掉本 Activity：shutdown 会拆 controller/sink，finish 让协议选择页接手。
+        shutdown(terminateProcess = false, reason = "user exited the projection screen")
+        startActivity(
+            Intent(this, ProtocolPickerActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
+        )
+        finish()
+    }
+
     private fun shutdown(terminateProcess: Boolean, reason: String) {
         if (!shuttingDown.compareAndSet(false, true)) return
         stopMicrophoneGainTest()
@@ -7082,6 +7140,32 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
     private fun attachSurface(surface: Surface) {
         sink?.setSurface(SCREEN_TYPE_MAIN, surface)
         sink?.setSurface(SCREEN_TYPE_ALT, surface)
+        // Surface 重建 = 解码器要重新来过，新解码器在拿到 IDR 之前解不出画面。
+        // 主动向手机要一次关键帧，别等解码器自己的重试循环（间隔 2s）才恢复。
+        if (activeScreenStreamTypes.isNotEmpty()) {
+            val requested = sink?.requestKeyFrame(SCREEN_TYPE_MAIN) ?: false
+            appendLog("surface attached: key frame requested=$requested")
+        }
+    }
+
+    /**
+     * 切回前台后恢复视频管线。
+     *
+     * 切到车机其它界面时 Activity 被 pause/stop，TextureView 的 SurfaceTexture 会被销毁，
+     * 解码器随之与 Surface 脱钩；回到前台时 Surface 重建、解码器重建。新解码器在拿到
+     * IDR 之前解不出任何东西（手机还在续传 GOP 中间的 P 帧），所以这里主动向手机要一次
+     * 关键帧，把"回来后黑屏几秒"缩短到几乎无感。
+     */
+    private fun resumeVideoPipeline() {
+        val sink = sink ?: return
+        if (activeScreenStreamTypes.isEmpty()) return
+        // Surface 还没重建好时不必强求：解码器会在 Surface 就绪后自行重建并索要关键帧。
+        if (currentSurface == null) {
+            appendLog("resume video pipeline: surface not ready yet")
+            return
+        }
+        val requested = sink.requestKeyFrame(SCREEN_TYPE_MAIN)
+        appendLog("resume video pipeline: key frame requested=$requested")
     }
 
     private fun onHostTouch(view: View, event: MotionEvent): Boolean {
@@ -7224,6 +7308,9 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
         // 右上角「切换协议」按钮：仅未连接时显示，链接成功后隐藏（避免驾驶中误触切协议）。
         switchProtocolButton?.visibility =
             if (!menuOpen && activeScreenStreamTypes.isEmpty()) View.VISIBLE else View.GONE
+        // 左上角「退出」链接：连接成功后显示，让用户能主动断开投屏回到协议选择页。
+        exitLinkButton?.visibility =
+            if (!menuOpen && activeScreenStreamTypes.isNotEmpty()) View.VISIBLE else View.GONE
         val showStage = !debugLogsEnabled &&
             !menuOpen &&
             activeScreenStreamTypes.isEmpty()

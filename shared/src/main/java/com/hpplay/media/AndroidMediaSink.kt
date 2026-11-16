@@ -96,6 +96,18 @@ class AndroidMediaSink(
         videoDecoders[type]?.setSurface(surface)
     }
 
+    /**
+     * Ask the phone for a fresh random access picture on the given stream.
+     *
+     * A decoder that was just rebuilt (after the host went to the background and the surface was
+     * recreated) cannot decode anything until the phone sends an IDR: it keeps sending P frames of
+     * the GOP it was in the middle of. The decoder-side recovery loop retries on its own, but the
+     * host can also ask explicitly when it comes back to the foreground.
+     *
+     * @return true when a request was actually delivered to the phone.
+     */
+    fun requestKeyFrame(type: Int): Boolean = videoRecoveryHandlers[type]?.invoke() ?: false
+
     fun clearSurface(type: Int, surface: Surface) {
         if (surfaces.remove(type, surface)) videoDecoders[type]?.setSurface(null)
     }
@@ -308,6 +320,11 @@ private class VideoDecoder(
     private var lastKeyFrameRequestNs = 0L
     @Volatile private var requestedSurface: Surface? = surface
     private var outputSurface: Surface? = surface
+    /**
+     * True once the decoder was detached from its window. The next surface must be paired with a
+     * freshly configured codec rather than a re-pointed one.
+     */
+    @Volatile private var surfaceDetached = false
     private var heldFrame: VideoJob.Frame? = null
     private var lastConfig: VideoJob.Config? = null
     private var renderedFrameLogged = false
@@ -326,6 +343,11 @@ private class VideoDecoder(
 
     fun setSurface(surface: Surface?) {
         requestedSurface = surface
+        // Remember that the decoder was detached from its window. When a new surface shows up we
+        // must rebuild the codec instead of calling setOutputSurface(): the old native window was
+        // destroyed in between, and re-pointing a codec at a fresh window that way leaves it
+        // rendering into a window it never got configured for — the picture stays black.
+        if (surface == null) surfaceDetached = true
     }
 
     override fun close() {
@@ -494,7 +516,9 @@ private class VideoDecoder(
             return
         }
         val codec = decoder
-        if (codec != null) {
+        // After a detach the old window is gone; a codec re-pointed at the new surface would render
+        // into a window it was never configured for, so rebuild instead.
+        if (codec != null && !surfaceDetached) {
             try {
                 codec.setOutputSurface(surface)
                 Log.i(TAG, "video decoder output surface updated")
@@ -503,6 +527,8 @@ private class VideoDecoder(
                 Log.w(TAG, "video decoder output surface update failed; reconfiguring", error)
             }
         }
+        if (surfaceDetached) Log.i(TAG, "video decoder rebuilding after surface detach")
+        surfaceDetached = false
         releaseDecoder()
         lastConfig?.let(::configureDecoder)
     }
@@ -608,7 +634,29 @@ private class VideoDecoder(
         pump = null
         syncGate = null
         if (codec != null) {
+            // A decoder that is rebuilt after the surface was recreated must start from a random
+            // access picture; otherwise the phone keeps sending P frames of a GOP we no longer
+            // have a reference for and the new decoder never renders anything (black screen).
             needsKeyFrame = true
+            // Drain the output buffers with render=false *before* stopping the codec. A buffer that
+            // was already handed to the native window cannot be returned once the OMX component is
+            // stopped ("can not return buffer N to native window"); that leaves the Surface's buffer
+            // queue broken and every decoder created afterwards renders nothing at all.
+            try {
+                val info = MediaCodec.BufferInfo()
+                var index = codec.dequeueOutputBuffer(info, 0)
+                var guard = 0
+                while (index >= 0 && guard++ < 64) {
+                    try {
+                        codec.releaseOutputBuffer(index, false)
+                    } catch (_: Exception) {
+                        // Best effort.
+                    }
+                    index = codec.dequeueOutputBuffer(info, 0)
+                }
+            } catch (_: Exception) {
+                // Best effort.
+            }
             try {
                 codec.stop()
             } catch (_: Exception) {
@@ -619,6 +667,9 @@ private class VideoDecoder(
             } catch (_: Exception) {
                 // Best effort.
             }
+        } else {
+            // No codec to stop, but the next one still starts blind: force a random access point.
+            needsKeyFrame = true
         }
     }
 

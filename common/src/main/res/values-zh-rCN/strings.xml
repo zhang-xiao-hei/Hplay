@@ -317,6 +317,8 @@
     <string name="protocol_home_current">当前协议：%1$s</string>
     <string name="protocol_home_open">打开 %1$s</string>
     <string name="protocol_home_switch">切换协议</string>
+    <string name="cast_exit_link">退出</string>
+    <string name="cast_exit_hint">断开连接并退出投屏界面</string>
     <string name="settings_more_gestures">更多打开设置的手势</string>
     <string name="settings_more_gestures_description">启用沿左边缘单指下滑打开设置</string>
     <string name="settings_multi_window_adaptive">画中画与分屏自适应</string>

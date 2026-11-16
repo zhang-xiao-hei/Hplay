@@ -320,6 +320,8 @@
     <string name="protocol_home_current">Current protocol: %1$s</string>
     <string name="protocol_home_open">Open %1$s</string>
     <string name="protocol_home_switch">Change protocol</string>
+    <string name="cast_exit_link">Exit</string>
+    <string name="cast_exit_hint">Disconnect and leave the projection screen</string>
     <string name="settings_more_gestures">More gestures to Settings page</string>
     <string name="settings_more_gestures_description">Enable a one-finger swipe down along the left edge to open settings</string>
     <string name="settings_multi_window_adaptive">Adapt to picture-in-picture and split screen</string>

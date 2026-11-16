@@ -72,6 +72,8 @@ class CarlifeHostActivity : com.hpplay.LanguageAwareActivity() {
     private var videoView: SurfaceView? = null
     private var cardHostView: FrameLayout? = null
     private var topBarView: View? = null
+    /** 左上角「退出」链接：连接成功后仍然可见（顶栏的其余部分会被隐藏）。 */
+    private var exitLinkView: TextView? = null
 
     private var activeVideoHeight = 0
     private var statusRailView: StatusRailView? = null
@@ -169,6 +171,20 @@ class CarlifeHostActivity : com.hpplay.LanguageAwareActivity() {
             ),
         )
 
+        // 左上角「退出」链接：独立于顶栏，投屏开始后依然可见。
+        val exitLink = buildExitLink()
+        exitLinkView = exitLink
+        // 还没连上时不显示（此时没有投屏可退出）。
+        exitLink.visibility = View.GONE
+        root.addView(
+            exitLink,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(48),
+                Gravity.START or Gravity.TOP,
+            ).apply { topMargin = dp(14); marginStart = dp(16) },
+        )
+
         // 状态条要用真实窗口尺寸（不含系统栏）排版，等第一帧布局完成后再排。
         root.post { layoutWithStatusRail() }
         root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
@@ -202,10 +218,12 @@ class CarlifeHostActivity : com.hpplay.LanguageAwareActivity() {
                         idleOverlay?.visibility = View.GONE
                         idleCard?.visibility = View.GONE
                         cardHostView?.visibility = View.GONE
-                        // 投屏开始后不再显示左右两个悬浮按钮（退出/设置）；三指下滑仍可打开设置。
+                        // 投屏开始后不再显示顶栏的设置齿轮（三指下滑仍可打开设置）；
+                        // 左上角的「退出」链接独立于顶栏，继续保留。
                         topBarView?.animate()?.alpha(0f)?.setDuration(200)?.withEndAction {
                             topBarView?.visibility = View.GONE
                         }?.start()
+                        exitLinkView?.visibility = View.VISIBLE
                     }
                 }
 
@@ -224,6 +242,8 @@ class CarlifeHostActivity : com.hpplay.LanguageAwareActivity() {
                             topBarView?.visibility = View.VISIBLE
                             topBarView?.alpha = 1f
                         }
+                        // 断开后退出链接没有意义（本来就没连上），藏起来。
+                        exitLinkView?.visibility = View.GONE
                         statusPill?.text = getString(R.string.carlife_disconnected)
                     }
                 }
@@ -582,29 +602,46 @@ class CarlifeHostActivity : com.hpplay.LanguageAwareActivity() {
             gear,
             FrameLayout.LayoutParams(dp(48), dp(48), Gravity.END or Gravity.TOP),
         )
-
-        val exit = TextView(this).apply {
-            text = getString(R.string.carlife_exit)
-            textSize = 14f
-            setTextColor(palette.title)
-            gravity = Gravity.CENTER
-            setPadding(dp(20), 0, dp(20), 0)
-            background = GradientDrawable().apply {
-                cornerRadius = dp(999).toFloat()
-                setColor(palette.surface)
-                setStroke(dp(1), palette.cardBorder)
-            }
-            setOnClickListener { finish() }
-        }
-        row.addView(
-            exit,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                dp(48),
-                Gravity.START or Gravity.TOP,
-            ),
-        )
         return row
+    }
+
+    /**
+     * 左上角「退出」链接。
+     *
+     * 独立于顶栏：投屏开始后顶栏会被淡出隐藏（只剩三指下滑能开设置），但退出入口必须
+     * 一直留着 —— 否则连上之后用户没有任何办法主动断开投屏。
+     */
+    private fun buildExitLink(): TextView = TextView(this).apply {
+        text = getString(R.string.carlife_exit)
+        textSize = 14f
+        setTextColor(palette.title)
+        gravity = Gravity.CENTER
+        setPadding(dp(20), 0, dp(20), 0)
+        background = GradientDrawable().apply {
+            cornerRadius = dp(999).toFloat()
+            setColor(palette.surface)
+            setStroke(dp(1), palette.cardBorder)
+        }
+        isClickable = true
+        isFocusable = true
+        contentDescription = getString(com.hpplay.host.R.string.cast_exit_hint)
+        setOnClickListener { exitProjection() }
+    }
+
+    /** 断开当前投屏并回到协议选择页。 */
+    private fun exitProjection() {
+        carlifeLog("exit projection requested from the top-left link")
+        controller?.stop("user exited")
+        controller = null
+        releaseMediaSession()
+        startActivity(
+            android.content.Intent(this, com.hpplay.ProtocolPickerActivity::class.java)
+                .addFlags(
+                    android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                        android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK,
+                ),
+        )
+        finish()
     }
 
     private fun buildIdleCard(): View {

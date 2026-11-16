@@ -355,7 +355,8 @@ class CarLifeController(
                 " -> ${if (needRebuild) "rebuild decoder" else "request keyframe"} (#$encoderRetryCount)",
         )
         if (needRebuild) {
-            rebuildDecoder("watchdog")
+            // 重建已经会索要关键帧，这里不要再重复发。
+            rebuildDecoder("watchdog", requestKeyframe = false)
             decoderRebuildCount++
             lastDecoderRebuildAt = now
         }
@@ -376,6 +377,7 @@ class CarLifeController(
     fun onHostResumed(surface: android.view.Surface?) {
         if (stopping) return
         val hadDecoder = videoDecoder?.isRunning == true
+        // ensureVideoDecoder 内部会在"新建解码器"时向手机索要关键帧，这里不用重复做。
         surface?.let { ensureVideoDecoder(it) }
         val nowHasDecoder = videoDecoder?.isRunning == true
         Log.i(
@@ -383,10 +385,6 @@ class CarLifeController(
             "host resumed: surface=${surface != null} decoder=$nowHasDecoder (was $hadDecoder)" +
                 " linkUp=${linkUp.get()} session=${session.state}",
         )
-        if (!hadDecoder && nowHasDecoder && session.state == CarLifeSession.State.ESTABLISHED) {
-            // 刚重建解码器：让手机重发 SPS/PPS/IDR，否则新解码器等不到关键帧只能黑屏。
-            session.requestVideoEncoderReset()
-        }
         if (!linkUp.get() && everEstablished) {
             Log.i(TAG, "host resumed: link is down, retry reconnect")
             listener.onStatusChanged("回到前台，正在重新连接…")
@@ -800,10 +798,8 @@ class CarLifeController(
      * 现在就地补建解码器，并让手机复位编码器重发 SPS/PPS/IDR，保证立刻出画。
      */
     private fun rebuildDecoderOnDemand(): CarLifeVideoDecoder? {
-        val decoder = rebuildDecoder("on demand") ?: return null
-        // 让手机重发关键帧，否则新解码器要等下一个 IDR 才能出画。
-        runCatching { session.requestVideoEncoderReset() }
-        return decoder
+        // 新解码器要等 IDR 才能出画，重建成功后立刻让手机重发 SPS/PPS/IDR。
+        return rebuildDecoder("on demand")
     }
 
     /**
@@ -811,8 +807,11 @@ class CarLifeController(
      *
      * 旧解码器必须先 release 完再建新的，且新实例只在完全可用后才放进 videoDecoder 字段，
      * 避免出现"字段指向死实例、活实例没人引用"的窗口。
+     *
+     * @param requestKeyframe 是否在重建成功后向手机索要关键帧。新解码器没有 IDR 就出不了画，
+     *   默认都需要；只有调用方已经单独请求过时才可以关掉，避免重复发命令。
      */
-    private fun rebuildDecoder(reason: String): CarLifeVideoDecoder? {
+    private fun rebuildDecoder(reason: String, requestKeyframe: Boolean = true): CarLifeVideoDecoder? {
         val result: CarLifeVideoDecoder? = synchronized(decoderLock) {
             val info = pendingVideoInfo
             val target = pendingSurface
@@ -839,14 +838,21 @@ class CarLifeController(
                 }
             }
         }
+        if (result != null && requestKeyframe) requestPhoneKeyframe("decoder rebuilt ($reason)")
         return result
     }
 
     /** 宿主在 Surface 创建/切换时调用；Surface 与编码器参数谁后到都能建起解码器。 */
-    fun ensureVideoDecoder(target: android.view.Surface): Boolean = synchronized(decoderLock) {
-        pendingSurface = target
-        maybeStartDecoderLocked()
-        videoDecoder?.isRunning == true
+    fun ensureVideoDecoder(target: android.view.Surface): Boolean {
+        val created = synchronized(decoderLock) {
+            pendingSurface = target
+            maybeStartDecoderLocked()
+        }
+        // 新建的解码器必须先拿到 IDR 才能出画（awaitingKeyframe=true 会丢掉所有 P 帧）。
+        // 切后台时 Surface 被销毁、回前台时重建解码器走的正是这条路径 —— 不主动要关键帧，
+        // 手机就会一直续传 GOP 中间的 P 帧，新解码器永远等不到 IDR，表现为"回来就是黑屏"。
+        if (created) requestPhoneKeyframe("decoder created")
+        return videoDecoder?.isRunning == true
     }
 
     /**
@@ -902,30 +908,57 @@ class CarLifeController(
      *
      * 分辨率变了必须重建解码器，否则旧格式的解码器解不出新流（黑屏）。
      * 泵线程死掉的解码器同样在这里重建 —— CarLifeVideoDecoder.start() 会自建 codec。
+     *
+     * @return true 表示这次新建了一个解码器实例（新实例必须等 IDR 才能出画）。
      */
-    private fun maybeStartDecoderLocked() {
-        val info = pendingVideoInfo ?: return
-        val target = pendingSurface ?: return
+    private fun maybeStartDecoderLocked(): Boolean {
+        val info = pendingVideoInfo ?: return false
+        val target = pendingSurface ?: return false
+        var created = false
         if (decoderWidth != info.width || decoderHeight != info.height) {
             if (decoderWidth != 0 || decoderHeight != 0) {
                 Log.i(TAG, "encoder params changed ${decoderWidth}x$decoderHeight -> ${info.width}x${info.height}")
                 videoDecoder?.release()
                 videoDecoder = null
+                created = true
             }
             decoderWidth = info.width
             decoderHeight = info.height
         }
-        val decoder = videoDecoder ?: CarLifeVideoDecoder().also { videoDecoder = it }
+        if (videoDecoder == null) {
+            videoDecoder = CarLifeVideoDecoder()
+            created = true
+        }
+        val decoder = videoDecoder ?: return false
         decoder.start(target, info.width, info.height)
         if (!decoder.isRunning) {
             Log.w(TAG, "decoder not running after start ${info.width}x${info.height}")
             decoder.release()
             if (videoDecoder === decoder) videoDecoder = null
         }
+        return created
     }
 
     private fun maybeStartDecoder() {
-        synchronized(decoderLock) { maybeStartDecoderLocked() }
+        val created = synchronized(decoderLock) { maybeStartDecoderLocked() }
+        if (created) requestPhoneKeyframe("decoder created")
+    }
+
+    /**
+     * 让手机重发 SPS/PPS/IDR。
+     *
+     * 每次新建解码器都必须调用：新解码器的 awaitingKeyframe 初始为 true，在拿到 IDR 之前
+     * 送进去的 P 帧会被全部丢弃（喂进去还会把硬解组件喂报错，泵线程一死画面就永久黑）。
+     * 而切后台/回前台时手机端毫不知情，只顾着续传当前 GOP —— 不主动要，就永远等不到 IDR。
+     *
+     * 同时让手机重新协商一遍编码器参数：切后台期间手机可能自己复位过编码器，
+     * 参数（比如码率/帧率）已经变了，只重发 SPS/PPS 会解不出画面。
+     */
+    private fun requestPhoneKeyframe(reason: String) {
+        if (session.state != CarLifeSession.State.ESTABLISHED) return
+        Log.i(TAG, "request phone keyframe ($reason)")
+        session.requestVideoEncoderReset()
+        session.requestVideoEncoderInit()
     }
 
     private var pendingVideoInfo: CarlifeMessages.VideoEncoderInfo? = null

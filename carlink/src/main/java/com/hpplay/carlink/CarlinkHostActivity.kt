@@ -51,6 +51,8 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
     private var modeToggle: TextView? = null
     /** Top-right "switch protocol" pill — kept only while disconnected; hidden once CarLink is linked. */
     private var switchProtocolButton: TextView? = null
+    /** Top-left "exit" link — shown once the phone is linked so the user can leave the cast screen. */
+    private var exitLinkButton: TextView? = null
     private var palette: SettingsPalette = SettingsPalette.of(true)
     private var videoReady = false
     private var hotspot: CarlinkHotspot? = null
@@ -189,6 +191,34 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
         )
         this.switchProtocolButton = switch
 
+        // 左上角「退出」链接：连接成功后出现，点击断开投屏并回到协议选择页。
+        val exitLink = TextView(this).apply {
+            text = getString(R.string.cast_exit_link)
+            setTextColor(palette.text)
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(20), dp(10), dp(20), dp(10))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(999).toFloat()
+                setColor(palette.surfaceElevated)
+                setStroke(dp(1), palette.cardBorder)
+            }
+            isClickable = true
+            isFocusable = true
+            contentDescription = getString(R.string.cast_exit_hint)
+            setOnClickListener { exitProjection() }
+            visibility = View.GONE
+        }
+        root.addView(
+            exitLink,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.START,
+            ).apply { topMargin = dp(14); marginStart = dp(16) },
+        )
+        this.exitLinkButton = exitLink
+
         // 设置齿轮：打开共享设置页（settings-only），CarLink 自己保持前台监听。三指下滑同效。
         val gear = android.widget.ImageButton(this).apply {
             setImageResource(R.drawable.ic_settings)
@@ -282,6 +312,8 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
                     card.visibility = View.GONE
                     // 链接成功后隐藏右上角「切换协议」按钮，避免驾驶中误触。
                     switchProtocolButton?.visibility = View.GONE
+                    // 同时给出左上角的「退出」链接，让用户能主动断开投屏。
+                    exitLinkButton?.visibility = View.VISIBLE
                 }
             }
         }
@@ -677,6 +709,27 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
     private fun updateSwitchProtocolVisibility() {
         switchProtocolButton?.visibility =
             if (videoReady) View.GONE else View.VISIBLE
+        exitLinkButton?.visibility =
+            if (videoReady) View.VISIBLE else View.GONE
+    }
+
+    /**
+     * 断开当前投屏并回到协议选择页。
+     *
+     * 用户在连接成功后从左上角的「退出」链接触发：把整条 CarLink 链路拆干净（WFD sink、
+     * 认证连接），再跳到协议选择页让用户换协议或重新连接。
+     */
+    private fun exitProjection() {
+        Log.i(tag, "exit projection requested from the top-left link")
+        com.hpplay.SessionLogger.log("carlink", "exit projection requested")
+        controller?.stop()
+        controller = null
+        videoReady = false
+        startActivity(
+            Intent(this, ProtocolPickerActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
+        )
+        finish()
     }
 
     private fun showConnectionInfo() {

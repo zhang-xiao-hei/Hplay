@@ -38,12 +38,19 @@ class CarlinkVideoSink : CarlinkSinkListener {
      * 的环境（如 swiftshader 模拟器）里无谓地分配硬件解码输出缓冲。
      */
     fun attachSurface(surface: Surface?) {
+        val previous = this.surface
         this.surface = surface
         if (surface != null && videoInitialized) {
             startNs = System.nanoTime()
             video.start(surface, videoMime, videoW, videoH, lowLatency)
         } else if (surface == null) {
-            video.release()
+            // 只解绑 Surface，不销毁解码器。
+            //
+            // 切到车机其它界面时 TextureView 的 SurfaceTexture 会被销毁，回到前台是全新的
+            // Surface。此时若把解码器一起 release 掉，回前台就必须重新等到下一个 IDR 才能出画
+            // （synced 被重置），表现为"切出去再回来黑屏几秒甚至一直黑"。
+            // 保留解码器、只换输出窗口，帧的解码状态（GOP 参考帧）都还在，立刻就能继续出画。
+            video.detachSurface(previous)
         }
     }
 

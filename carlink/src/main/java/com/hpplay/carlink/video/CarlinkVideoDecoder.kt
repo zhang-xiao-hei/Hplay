@@ -34,6 +34,16 @@ class CarlinkVideoDecoder(
     private var isHevc = false
     private var frames = 0L
 
+    /**
+     * True while the decoder has no window to render to.
+     *
+     * The host switched to another app and the TextureView's SurfaceTexture was destroyed. The
+     * decoder itself stays alive (its GOP reference frames are still valid), but the output
+     * buffers must not be rendered into the dead window — they are returned with render=false
+     * instead. The next surface simply takes over.
+     */
+    @Volatile private var detached = false
+
     /** 在 Surface 就绪后调用；可重复调用以切换 Surface。 */
     @Synchronized
     fun start(surface: Surface, mime: String, width: Int, height: Int, lowLatency: Boolean) {
@@ -44,10 +54,38 @@ class CarlinkVideoDecoder(
         this.isHevc = mime.contains("hevc", true)
         this.wantSurface = surface
         if (codec != null && configured) {
-            runCatching { codec?.setOutputSurface(surface) }
+            // 换 Surface 失败必须重建解码器：继续用旧解码器的话，它仍然渲染到那个已经
+            // 销毁的 Surface 上，画面永远是黑的。原来的 runCatching 把异常吞掉后直接
+            // return，正是"切回前台一直黑屏"的直接原因。
+            val swapped = runCatching { codec?.setOutputSurface(surface) }.isSuccess
+            if (swapped) {
+                detached = false
+                Log.i(tag, "video decoder output surface updated")
+                return
+            }
+            Log.w(tag, "setOutputSurface failed; reconfiguring decoder")
+        }
+        detached = false
+        configure(surface)
+    }
+
+    /**
+     * The host's window went away; keep the decoder and its GOP state alive.
+     *
+     * Releasing the codec here would reset [synced], so the next surface would have to wait for
+     * a fresh IDR before it could render anything — that is the "black screen after switching
+     * away and back" symptom. Keeping the codec means the reference frames survive and the
+     * picture comes back immediately.
+     */
+    @Synchronized
+    fun detachSurface(surface: Surface?) {
+        if (codec == null || !configured) {
+            // Nothing to preserve.
+            release()
             return
         }
-        configure(surface)
+        detached = true
+        Log.i(tag, "video decoder detached from surface; keeping decoder for a fast resume")
     }
 
     private fun configure(surface: Surface) {
@@ -70,8 +108,14 @@ class CarlinkVideoDecoder(
                 override fun onInputBufferAvailable(mc: MediaCodec, index: Int) = feed(mc, index)
                 override fun onOutputBufferAvailable(mc: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
                     try {
-                        mc.releaseOutputBuffer(index, info.presentationTimeUs * 1000L)
-                        frames++
+                        if (detached) {
+                            // 没有窗口可画：把缓冲还给解码器（render=false），不要往已销毁的
+                            // Surface 上渲染。渲染到死窗口会让 OMX 组件报错，缓冲再也还不回去。
+                            mc.releaseOutputBuffer(index, false)
+                        } else {
+                            mc.releaseOutputBuffer(index, info.presentationTimeUs * 1000L)
+                            frames++
+                        }
                     } catch (t: Throwable) {
                         Log.w(tag, "releaseOutputBuffer failed", t)
                     }
@@ -143,10 +187,16 @@ class CarlinkVideoDecoder(
         running = false
         configured = false
         synced = false
+        detached = false
         queue.clear()
         val c = codec
         codec = null
         if (c != null) {
+            // 本解码器用的是异步 MediaCodec 回调模式：输出缓冲由 onOutputBufferAvailable
+            // 回调交还，不能（也不允许）在这里 dequeueOutputBuffer —— 异步模式下调用会抛
+            // IllegalStateException。异步模式下停机的正确做法是 stop()：它会取消所有 pending
+            // 回调并让组件自行收尾。已经交给 native window 的 buffer 由 Surface 侧消费，
+            // 不会留在队列里造成 "can not return buffer N to native window"。
             runCatching { c.stop() }
             runCatching { c.release() }
         }
