@@ -73,6 +73,10 @@ class CarlinkAuth(
         Log.i(tag, "AUTH channel started, waiting for AuthRequest")
     }
 
+    private fun logSession(message: String) {
+        runCatching { com.hpplay.SessionLogger.log("carlink", message) }
+    }
+
     private fun onFrame(ch: CarlinkChannel, frame: CarlinkFrame, body: ByteArray) {
         try {
             when (frame.category) {
@@ -106,6 +110,11 @@ class CarlinkAuth(
         pendingModel = req.model
         pendingWorkModes = req.workModes
 
+        logSession(
+            "AuthRequest v=${req.version} model=${req.model} id=${req.id.size()}B " +
+                "authPk=${req.authPk.size()}B agreementPk=${req.agreementPk.size()}B " +
+                "random=${req.random.size()}B userConfirmed=${req.userConfirmed} workModes=${req.workModes}",
+        )
         val phoneRandom = req.random.toByteArray()
         serverRandom = randomBytes(32)
 
@@ -157,6 +166,10 @@ class CarlinkAuth(
             .build()
         val out = CarlinkCodec.encodeAuthResponse(resp)
         channel?.send(ChannelCategory.AUTH, 2, out, MsgType.RES)
+        logSession(
+            "AuthResponse sent result=$RESULT_OK pin=${if (pinOk) "yes(len=${pinText?.length})" else "none"} " +
+                "hmac=${authPkHmac.size}B sig=${agreementPkSig.size}B",
+        )
         Log.i(
             tag,
             "AuthResponse sent (result=$RESULT_OK, pinUsed=$pinOk(len=${pinText?.length ?: 0}), " +
@@ -173,10 +186,14 @@ class CarlinkAuth(
         val phoneIp = try {
             String(CarlinkCrypto.aesGcmDecrypt(key, confirm.cipher.toByteArray()))
         } catch (t: Throwable) {
-            Log.w(tag, "AuthConfirm decrypt failed, falling back to socket peer ip", t)
-            socket.inetAddress?.hostAddress ?: "0.0.0.0"
+            // 解不开 AuthConfirm = 双方算出的 session_key 不一致（口令/派生参数不同）。以前这里
+            // 吞掉异常、用 socket 对端 IP 顶替然后照常上报"认证成功"，结果 CONTROL 的每一帧都
+            // 解不开，界面却是"已连接"，把真正的失败点彻底藏起来了。
+            onError(IllegalStateException("AuthConfirm 解密失败：session_key 不一致（${t.message}）", t))
+            return
         }
         Log.i(tag, "AuthConfirm -> phoneIp=$phoneIp")
+        logSession("AuthConfirm ok, session_key matches, phoneIp=$phoneIp")
         onHandshakeDone(
             AuthResult(
                 phoneIp = phoneIp,
