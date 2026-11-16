@@ -22,7 +22,15 @@ object LocalBluetoothAddress {
     fun hex(context: Context, adapter: BluetoothAdapter?): String? {
         cache.get()?.let { return it }
         val fromRoot = readFromSystem()
-        val mac = fromRoot ?: adapter?.address?.takeIf { !isPlaceholder(it) }
+        // BluetoothAdapter.address needs BLUETOOTH_CONNECT on Android 12+, a runtime permission
+        // the user can refuse; that is why the system file path above is tried first. Catch it
+        // explicitly instead of runCatching: lint only recognises an explicit try/catch.
+        val fallback = try {
+            adapter?.address
+        } catch (_: SecurityException) {
+            null
+        }
+        val mac = fromRoot ?: fallback?.takeIf { !isPlaceholder(it) }
         val hex = mac?.replace(":", "")?.replace("-", "")?.lowercase()
             ?.takeIf { it.length == 12 && it.all { ch -> ch in '0'..'9' || ch in 'a'..'f' } }
         if (hex != null) cache.set(hex)
