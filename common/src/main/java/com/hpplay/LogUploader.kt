@@ -153,7 +153,15 @@ internal object LogUploader {
 
     private fun appVersion(context: Context): String = runCatching {
         val info = context.packageManager.getPackageInfo(context.packageName, 0)
-        info.versionName + "(" + info.longVersionCode + ")"
+        // longVersionCode is API 28; minSdk is 24, so fall back to the int field.
+        val versionCode =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                info.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                info.versionCode.toLong()
+            }
+        info.versionName + "(" + versionCode + ")"
     }.getOrDefault("")
 
     private const val DQ = "\""
