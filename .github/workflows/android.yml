@@ -92,6 +92,33 @@ jobs:
           :mobile:assembleDebug
           :automotive:assembleDebug
           --stacktrace
+          --continue
+
+      - name: Collect lint reports
+        if: always()
+        run: |
+          set -uo pipefail
+          # Lint only prints the first failure in the console; the full list lives in the text
+          # report. Dump it so a red lint run is diagnosable from the log alone.
+          found=0
+          for report in $(find . -path '*/build/intermediates/lint_intermediate_text_report/*/lintReport*/*.txt' 2>/dev/null | sort); do
+            echo "===== ${report} ====="
+            cat "${report}"
+            found=1
+          done
+          if [ "${found}" = "0" ]; then
+            echo "No lint text report was produced"
+          fi
+
+      - name: Upload lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-reports-${{ github.sha }}
+          path: |
+            **/build/reports/lint-results-*.html
+            **/build/intermediates/lint_intermediate_text_report/**/*.txt
+          if-no-files-found: ignore
 
       - name: Verify signed debug APKs
         if: steps.signing.outputs.prepared == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -206,6 +233,21 @@ jobs:
           :automotive:assembleRelease
           :mobile:assembleRelease
           --stacktrace
+          --continue
+
+      - name: Collect lint reports
+        if: always()
+        run: |
+          set -uo pipefail
+          found=0
+          for report in $(find . -path '*/build/intermediates/lint_intermediate_text_report/*/lintReport*/*.txt' 2>/dev/null | sort); do
+            echo "===== ${report} ====="
+            cat "${report}"
+            found=1
+          done
+          if [ "${found}" = "0" ]; then
+            echo "No lint text report was produced"
+          fi
 
       - name: Verify and collect signed APKs
         run: |

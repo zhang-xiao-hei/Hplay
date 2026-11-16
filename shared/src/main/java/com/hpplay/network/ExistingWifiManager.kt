@@ -156,13 +156,18 @@ class ExistingWifiManager(
                 parsePsk(xml, ssid)?.let { return it }
             }
         }
-        runCatching {
+        // try/catch (not runCatching): lint can only see that a SecurityException is handled when
+        // it is written out explicitly. getConfiguredNetworks() needs ACCESS_FINE_LOCATION, which is
+        // a runtime permission the user can refuse, and the framework throws when it is missing.
+        try {
             @Suppress("DEPRECATION")
             wifiManager.configuredNetworks
                 ?.firstOrNull { it.SSID?.trim('"') == ssid }
                 ?.preSharedKey?.trim('"')
                 ?.takeIf { it.isNotEmpty() && it != "*" }
                 ?.let { return it }
+        } catch (_: SecurityException) {
+            // Location permission was not granted; the adb channel above is the real source.
         }
         Log.w(TAG, "Existing Wi-Fi passphrase not readable for '$ssid'; sending an empty one")
         return ""
