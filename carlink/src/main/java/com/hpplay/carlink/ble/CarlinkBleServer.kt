@@ -66,6 +66,8 @@ class CarlinkBleServer(
     private var lastAdvertiseData: AdvertiseData? = null
     private var lastScanResponse: AdvertiseData? = null
     @Volatile private var usingLegacy = true
+    /** 广播是否真的开始过（回调 onAdvertisingSetStarted / onStartSuccess 才置 true）。 */
+    @Volatile private var advertisingStarted = false
     /** 长写/分包写的累积缓冲（按设备地址）。 */
     private val preparedWrites = java.util.concurrent.ConcurrentHashMap<String, java.io.ByteArrayOutputStream>()
 
@@ -76,8 +78,12 @@ class CarlinkBleServer(
     /** 广播身份块里的序列号（1 字节，自增，用于手机端去重）。 */
     @Volatile private var serial: Int = 0
 
-    /** 是否已在广播（供宿主/日志查询）。 */
-    val isAdvertising: Boolean get() = running
+    /** 是否**真正**在广播（供宿主/日志查询）。注意：GATT server 起来不等于广播起来了。 */
+    val isAdvertising: Boolean get() = running && advertisingStarted
+
+    /** 最近一次广播失败的原因（成功或无失败时为 null），供宿主直接显示到状态条/日志区。 */
+    @Volatile var lastAdvertisingError: String? = null
+        private set
 
     companion object {
         private const val tag = "CarlinkBle"
@@ -142,6 +148,18 @@ class CarlinkBleServer(
         if (subscribed) notifyServerInfo(info)
     }
 
+    /**
+     * 宿主主动重试广播（蓝牙被系统重启、或首次广播失败后）。
+     * 广播 API 必须在主线程调用，这里统一投递到主线程。
+     */
+    fun restartAdvertising() {
+        if (!running) return
+        mainHandler.post {
+            runCatching { startAdvertising() }
+                .onFailure { Log.e(tag, "restartAdvertising failed", it) }
+        }
+    }
+
     private fun buildService(): BluetoothGattService {
         val service = BluetoothGattService(
             UUID.fromString(CarlinkBleUuids.GATT_SERVICE),
@@ -185,6 +203,12 @@ class CarlinkBleServer(
     private fun startAdvertising() {
         mainHandler.removeCallbacks(refreshAdvertising)
         mainHandler.postDelayed(refreshAdvertising, ADVERTISING_REFRESH_MILLIS)
+        advertisingStarted = false
+        if (advertiser == null) {
+            lastAdvertisingError = "no BLE advertiser (peripheral mode unsupported)"
+            Log.w(tag, "startAdvertising skipped: no BLE advertiser")
+            return
+        }
         // 同一时刻只保留一路广播：先停掉上一轮（无论扩展广播还是经典广播），
         // 否则手机会看到一个"正在广播但不可连"的实例，连接直接失败。
         runCatching { advertiser?.stopAdvertisingSet(advertiseSetCallback) }
@@ -194,11 +218,14 @@ class CarlinkBleServer(
         //          [modelId前4B][vendor前2B][RSSI阈值1B])
         //   扫描响应 = ServiceData(00000002, 车机短名 UTF-8 ≤16B)
         // 手机端扫描 Filter 只认 FCFB + 00000001 这段身份数据，缺了它认不出是 CarLink 车机。
+        // 载荷只构造一次：身份块里的序列号每构造一次就自增并落盘，若为了打日志再构造一遍，
+        // 真正广播出去的序列号会和日志/落盘的差一拍，排查"这版到底广播了什么"时会看错。
+        val payload = buildAdvertisingPayload()
         val data = AdvertiseData.Builder()
             .addServiceUuid(ParcelUuid(UUID.fromString(CarlinkBleUuids.ADV_SERVICE)))
             .addServiceData(
                 ParcelUuid(UUID.fromString(CarlinkBleUuids.ADV_DATA)),
-                buildAdvertisingPayload(),
+                payload,
             )
             .setIncludeDeviceName(false)
             .build()
@@ -213,7 +240,11 @@ class CarlinkBleServer(
         // 优先用扩展广播 set（API26+，蒲公英同款：connectable+scannable+legacy+LE_1M）。
         // 若该 ROM 不支持扩展广播（部分定制蓝牙栈），onAdvertisingSetStarted 会返回失败，
         // 此时回退到经典 startAdvertising（同样带 data+scanResponse）。
-        Log.i(tag, "advertising payload: " + buildAdvertisingPayload().joinToString("") { "%02x".format(it) })
+        Log.i(
+            tag,
+            "advertising payload: " + payload.joinToString("") { "%02x".format(it) } +
+                " carId=" + lastCarIdUsed + " serial=" + serial,
+        )
         lastAdvertiseData = data
         lastScanResponse = scanResponse
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -252,7 +283,31 @@ class CarlinkBleServer(
             com.hpplay.AirPlayPersistence.loadCarlinkCarId(context)
         }.getOrNull()
         if (!override.isNullOrBlank()) return override
-        return lastCarIdUsed ?: com.hpplay.network.LocalBluetoothAddress.peek() ?: CAR_ID
+        return lastCarIdUsed
+            ?: com.hpplay.network.LocalBluetoothAddress.peek()
+            ?: derivedCarId()
+    }
+
+    /**
+     * 读不到本机蓝牙 MAC 时的兜底 carId。
+     *
+     * 这里**不能**退回到写死的 [CAR_ID]（101010101010）：所有装这版的车机都用同一个 ID，手机端
+     * 会当成陌生/重复车机直接忽略，表现就是「手机根本不发现车机」。改为按 ANDROID_ID 派生一个
+     * 每台车机都不同、且跨重启稳定的 6 字节 ID；MAC 一旦能读到，[carIdHex] 仍优先用真实 MAC。
+     */
+    private fun derivedCarId(): String {
+        val seed = runCatching {
+            android.provider.Settings.Secure.getString(
+                appContext.contentResolver,
+                android.provider.Settings.Secure.ANDROID_ID,
+            )
+        }.getOrNull().orEmpty().ifBlank { appContext.packageName }
+        val digest = runCatching {
+            java.security.MessageDigest.getInstance("MD5")
+                .digest((seed + "|hplay-carlink").toByteArray(Charsets.UTF_8))
+        }.getOrNull()
+        if (digest == null || digest.size < 6) return CAR_ID
+        return digest.take(6).joinToString("") { "%02x".format(it.toInt() and 0xFF) }
     }
 
     /**
@@ -265,16 +320,31 @@ class CarlinkBleServer(
             return
         }
         Thread({
-            val hex = com.hpplay.network.LocalBluetoothAddress.hex(context, adapter)
-            if (hex != null) {
-                lastCarIdUsed = hex
-                runCatching { com.hpplay.AirPlayPersistence.saveCarlinkCarId(context, hex) }
-                Log.i(tag, "carId resolved: $hex")
-            } else {
-                Log.w(tag, "carId unresolved; advertising with fallback id")
-            }
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                runCatching { startAdvertising() }
+            // 关键：无论解析 MAC 这一步怎么失败（root adb 断开、线程被打断、解析抛非 IO 异常），
+            // 都必须在 finally 里把广播拉起来。之前这里没有兜底，只要解析线程抛出去，广播就永远
+            // 不会开始，而 start() 已经返回 true——车机界面显示"BLE 就绪"，手机却完全搜不到。
+            try {
+                val hex = runCatching {
+                    com.hpplay.network.LocalBluetoothAddress.hex(context, adapter)
+                }.getOrNull()
+                if (hex != null) {
+                    lastCarIdUsed = hex
+                    runCatching { com.hpplay.AirPlayPersistence.saveCarlinkCarId(context, hex) }
+                    Log.i(tag, "carId resolved: $hex")
+                } else {
+                    Log.w(
+                        tag,
+                        "carId unresolved (no root adb / no readable MAC); " +
+                            "advertising with derived id " + derivedCarId(),
+                    )
+                }
+            } catch (t: Throwable) {
+                Log.e(tag, "carId resolve failed; falling back to derived id", t)
+            } finally {
+                mainHandler.post {
+                    runCatching { startAdvertising() }
+                        .onFailure { Log.e(tag, "startAdvertising threw", it) }
+                }
             }
         }, "carlink-carid").start()
     }
@@ -367,8 +437,11 @@ class CarlinkBleServer(
             Log.i(tag, "advertising set started status=$status txPower=$txPower")
             if (status == AdvertisingSetCallback.ADVERTISE_SUCCESS) {
                 usingLegacy = false
+                advertisingStarted = true
+                lastAdvertisingError = null
                 listener.onAdvertisingStarted()
             } else if (customInterval) {
+                lastAdvertisingError = "advertising set failed status=$status"
                 // 少数 ROM 不接受自定义间隔：退回默认间隔的扩展广播再试一次。
                 Log.w(tag, "advertising set failed status=$status, retrying with default interval")
                 customInterval = false
@@ -395,10 +468,14 @@ class CarlinkBleServer(
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
             Log.i(tag, "BLE advertising started (legacy)")
             usingLegacy = true
+            advertisingStarted = true
+            lastAdvertisingError = null
             listener.onAdvertisingStarted()
         }
 
         override fun onStartFailure(errorCode: Int) {
+            lastAdvertisingError = "legacy advertise failed code=$errorCode"
+            advertisingStarted = false
             Log.e(tag, "BLE advertising failed code=$errorCode")
         }
     }
@@ -532,6 +609,7 @@ class CarlinkBleServer(
     fun stop() {
         if (!running) return
         running = false
+        advertisingStarted = false
         // 停扩展广播（startAdvertisingSet 对应 stopAdvertisingSet）与经典广播两条路径。
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             runCatching { advertiser?.stopAdvertisingSet(advertiseSetCallback) }
