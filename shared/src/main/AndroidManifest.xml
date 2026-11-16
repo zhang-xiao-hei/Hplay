@@ -30,9 +30,15 @@
          普通安装下系统会忽略这些声明，App 照常工作；放进 priv-app 后 CONTROL_VPN 让
          VpnService.prepare() 直接返回 null，绕开会被 ROM 秒关的授权弹窗，打通有线 CarPlay 的
          NCM→tun 链路。 -->
-    <uses-permission android:name="android.permission.CONTROL_VPN" />
-    <uses-permission android:name="android.permission.BLUETOOTH_PRIVILEGED" />
-    <uses-permission android:name="android.permission.NETWORK_SETTINGS" />
+    <uses-permission
+        android:name="android.permission.CONTROL_VPN"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_PRIVILEGED"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.NETWORK_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
     <!-- 声明但不在安装时授予：供设置页「一键授权」通过 loopback adb 执行
          `pm grant` 使用。Android 要求 pm grant 的目标权限必须先在 manifest 里声明，
          否则报 "has not requested permission"。 -->
