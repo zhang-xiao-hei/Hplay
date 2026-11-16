@@ -6183,31 +6183,34 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
             val sameAsPanel = root.width == panel.width && root.height == panel.height
             if (!sameAsPanel) return DisplaySize(root.width, root.height)
         }
-        val insets = runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val windowInsets = windowManager.currentWindowMetrics.windowInsets
-                windowInsets.getInsetsIgnoringVisibility(
-                    android.view.WindowInsets.Type.systemBars() or
-                        android.view.WindowInsets.Type.displayCutout(),
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                val legacy = window?.decorView?.rootWindowInsets
-                if (legacy == null) {
-                    android.graphics.Insets.NONE
-                } else {
-                    @Suppress("DEPRECATION")
-                    android.graphics.Insets.of(
-                        legacy.systemWindowInsetLeft,
-                        legacy.systemWindowInsetTop,
-                        legacy.systemWindowInsetRight,
-                        legacy.systemWindowInsetBottom,
+        // Four plain ints, never android.graphics.Insets: the Insets type itself only exists
+        // from API 29, and this branch also runs on API 24, where merely touching it is a
+        // NoClassDefFoundError rather than a catchable failure.
+        val insets: IntArray? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching {
+                val bars = windowManager.currentWindowMetrics.windowInsets
+                    .getInsetsIgnoringVisibility(
+                        android.view.WindowInsets.Type.systemBars() or
+                            android.view.WindowInsets.Type.displayCutout(),
                     )
-                }
+                intArrayOf(bars.left, bars.top, bars.right, bars.bottom)
+            }.getOrNull()
+        } else {
+            @Suppress("DEPRECATION")
+            val legacy = window?.decorView?.rootWindowInsets
+            if (legacy == null) {
+                null
+            } else {
+                intArrayOf(
+                    legacy.systemWindowInsetLeft,
+                    legacy.systemWindowInsetTop,
+                    legacy.systemWindowInsetRight,
+                    legacy.systemWindowInsetBottom,
+                )
             }
-        }.getOrDefault(android.graphics.Insets.NONE)
-        val width = panel.width - insets.left - insets.right
-        val height = panel.height - insets.top - insets.bottom
+        }
+        val width = panel.width - (insets?.get(0) ?: 0) - (insets?.get(2) ?: 0)
+        val height = panel.height - (insets?.get(1) ?: 0) - (insets?.get(3) ?: 0)
         if (width <= 0 || height <= 0) return panel
         return DisplaySize(width, height)
     }
