@@ -521,18 +521,52 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
 
             override fun onAdvertisingStarted() {
                 Log.i(tag, "BLE advertising started")
+                // 广播真的起来了才把状态条改成"就绪"，否则界面会假装准备好了。
+                runOnUiThread {
+                    val lan = lanIp
+                    statusPill?.text = if (connectionMode == MODE_LAN && lan != null) {
+                        getString(R.string.carlink_lan_ready, lan)
+                    } else {
+                        getString(R.string.carlink_ble_ready)
+                    }
+                }
             }
         })
         bleServer = ble
         val started = runCatching { ble.start() }.getOrDefault(false)
-        val lan = lanIp
-        statusPill?.text = when {
-            !started -> getString(R.string.carlink_ble_failed)
-            connectionMode == MODE_LAN && lan != null -> getString(R.string.carlink_lan_ready, lan)
-            else -> getString(R.string.carlink_ble_ready)
+        if (!started) {
+            statusPill?.text = getString(R.string.carlink_ble_failed)
+            appendLog("BLE provisioning failed to start: permission / bluetooth off / adapter")
+            return
         }
-        if (!started) appendLog("BLE provisioning failed to start")
+        val lan = lanIp
+        statusPill?.text = if (connectionMode == MODE_LAN && lan != null) {
+            getString(R.string.carlink_lan_ready, lan)
+        } else {
+            getString(R.string.carlink_ble_ready)
+        }
+        // start() 只代表 GATT server 起来了，广播是异步的（还要先解析 carId）。延迟复核一次真实
+        // 广播状态：没广播起来就明确报错并重试一次——否则界面显示"就绪"、手机却完全搜不到车机，
+        // 现场看不出任何线索（这正是"CarLink 连不上"最难查的一种形态）。
+        bleRetryHandler.postDelayed({
+            if (!runCatching { ble.isAdvertising }.getOrDefault(false)) {
+                val reason = runCatching { ble.lastAdvertisingError }.getOrNull() ?: "did not start"
+                appendLog("BLE advertising not running: $reason; retrying once")
+                runCatching { ble.restartAdvertising() }
+                bleRetryHandler.postDelayed({
+                    if (!runCatching { ble.isAdvertising }.getOrDefault(false)) {
+                        statusPill?.text = getString(R.string.carlink_ble_failed)
+                        appendLog(
+                            "BLE advertising still down: " +
+                                (runCatching { ble.lastAdvertisingError }.getOrNull() ?: "unknown"),
+                        )
+                    }
+                }, 3_000L)
+            }
+        }, 2_500L)
     }
+
+    private val bleRetryHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     /**
      * 保证热点已开并把 ServerInfo 下发（幂等）。手机写入 ClientInfo 时触发：
@@ -833,6 +867,9 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
 
     private fun appendLog(message: String) {
         Log.i(tag, message)
+        // 同时落盘到 carlink 会话日志：现场"手机根本搜不到车机"时，用户可以直接从会话日志里
+        // 看到广播状态/身份块取值，不必非要连 adb 抓 logcat（这类问题最缺的就是现场证据）。
+        runCatching { com.hpplay.SessionLogger.log("carlink", message) }
     }
 
     private fun buildBootCard(): View {
