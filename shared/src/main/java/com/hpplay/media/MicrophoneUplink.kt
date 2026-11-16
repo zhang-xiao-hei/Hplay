@@ -1,5 +1,6 @@
 package com.hpplay.media
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.media.AudioRecord
 import android.util.Log
@@ -56,6 +57,9 @@ internal class MicrophoneUplink(
         }
     }
 
+    // RECORD_AUDIO is a runtime permission; the host activity asks for it before a session
+    // starts and a refusal surfaces as the catch in start(), so there is nothing to check here.
+    @SuppressLint("MissingPermission")
     private fun startCapture() {
         // A call owns the communication route; a voice memo (WeChat/QQ) or Siri does not, and
         // switching the device into communication mode for them rerouted the head unit audio and
@@ -194,11 +198,14 @@ internal class MicrophoneUplink(
         }
     }
 
+    // RECORD_AUDIO is a runtime permission, granted by the host activity before a session
+    // starts; a refusal is logged and stops the escalation instead of crashing.
     /**
      * Walks the capture-source ladder after digital silence: VOICE_COMMUNICATION (the head unit's
      * call path, with communication mode so its routing engages), then plain MIC. The next recorder
      * is opened before the old one is touched, so a refused source leaves the current capture alive.
      */
+    @SuppressLint("MissingPermission")
     private fun escalateSource(current: AudioRecord): AudioRecord? {
         val nextLevel = escalateLevel + 1
         val nextSource = when (nextLevel) {
