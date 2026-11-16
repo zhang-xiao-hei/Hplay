@@ -140,5 +140,12 @@ runs:
           -alias "${ANDROID_KEY_ALIAS}" > /dev/null
 
         echo "ANDROID_KEYSTORE_PATH=${work}/hplay-release.p12" >> "${GITHUB_ENV}"
+        # The Gradle signing config reads the store path, the store password, the alias and the
+        # key password from four separate variables. Exporting only the path leaves the signing
+        # config half-filled, and AGP then fails with "SigningConfig release is missing required
+        # property storePassword" while packaging -- far away from the actual cause.
+        echo "ANDROID_KEYSTORE_PASSWORD=${RELEASE_KEYSTORE_PASSWORD}" >> "${GITHUB_ENV}"
+        echo "ANDROID_KEY_ALIAS=${ANDROID_KEY_ALIAS}" >> "${GITHUB_ENV}"
+        echo "ANDROID_KEY_PASSWORD=${ANDROID_KEY_PASSWORD}" >> "${GITHUB_ENV}"
         echo "prepared=true" >> "${GITHUB_OUTPUT}"
         echo "release keystore rebuilt and verified (alias=${ANDROID_KEY_ALIAS})"
