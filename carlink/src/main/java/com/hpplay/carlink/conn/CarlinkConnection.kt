@@ -11,7 +11,7 @@ import java.net.ServerSocket
 import java.net.Socket
 
 /**
- * CarLink 车机端连接层：监听 AUTH/CONTROL/SENSOR/MEDIA/CERT/VIDEO 六个端口，等待手机连入。
+ * CarLink 车机端连接层：监听 AUTH/CONTROL/SENSOR/MEDIA/CERT/VIDEO/UIBC 七个端口，等待手机连入。
  *
  * 车机 = TCP 服务端（与 libovmsink.so 作为 RTSP 客户端相对）。手机连入 AUTH 完成握手后，
  * 拿到手机 IP（= 视频 RTSP 源 host）与 AES 会话密钥；随后 CONTROL/SENSOR/MEDIA/CERT/VIDEO
@@ -46,6 +46,7 @@ class CarlinkConnection(
     private var mediaServer: ServerSocket? = null
     private var certServer: ServerSocket? = null
     private var videoServer: ServerSocket? = null
+    private var uibcServer: ServerSocket? = null
 
     private var auth: CarlinkAuth? = null
     private var control: CarlinkControl? = null
@@ -67,6 +68,11 @@ class CarlinkConnection(
     /** 已经被手机接受过的口令；命中后不再轮换。 */
     @Volatile private var pinnedPin: String? = null
 
+    /** 把关键节点同时写进 carlink 会话日志（现场没有 adb 时唯一能取回的线索）。 */
+    private fun logSession(message: String) {
+        runCatching { com.hpplay.SessionLogger.log("carlink", message) }
+    }
+
     /** 取出本次 AUTH 握手要用的候选口令。 */
     private fun nextPin(): String? {
         pinnedPin?.let { return it }
@@ -78,6 +84,8 @@ class CarlinkConnection(
         val index = pinCursor.getAndIncrement()
         val chosen = list[index % list.size]
         Log.i(tag, "AUTH candidate #$index used (len=${chosen.length}, pool=${list.size})")
+        // 现场最缺的就是"这次握手到底用了哪个口令"：只记长度和序号，不落明文。
+        logSession("AUTH candidate #$index (len=${chosen.length}, pool=${list.size})")
         return chosen
     }
 
@@ -101,10 +109,19 @@ class CarlinkConnection(
         mediaServer = bind(CarlinkPorts.MEDIA)
         certServer = bind(CarlinkPorts.CERT)
         videoServer = bind(CarlinkPorts.VIDEO)
+        // UIBC(4321) 是 GetPortResponse 里明确下发给手机的端口，这里以前只声明常量、从不监听，
+        // 手机去连就是 connection refused（表现为"投屏出来了但点不动/直接掉线"）。
+        uibcServer = bind(CarlinkPorts.UIBC)
         if (authServer == null) {
             listener.onState(State.ERROR, "AUTH 端口 ${CarlinkPorts.AUTH} 绑定失败")
             return
         }
+        logSession(
+            "listen ports AUTH=${CarlinkPorts.AUTH} CONTROL=${CarlinkPorts.CONTROL} " +
+                "SENSOR=${CarlinkPorts.SENSOR} MEDIA=${CarlinkPorts.MEDIA} " +
+                "CERT=${CarlinkPorts.CERT} VIDEO=${CarlinkPorts.VIDEO} UIBC=${CarlinkPorts.UIBC}" +
+                " (uibc bound=${uibcServer != null})",
+        )
         listener.onState(
             State.LISTENING,
             "监听端口 AUTH=${CarlinkPorts.AUTH} CONTROL=${CarlinkPorts.CONTROL} " +
@@ -117,6 +134,7 @@ class CarlinkConnection(
         acceptLoop("media", mediaServer) { acceptMedia(it) }
         acceptLoop("cert", certServer) { acceptCert(it) }
         acceptLoop("video", videoServer) { acceptVideo(it) }
+        acceptLoop("uibc", uibcServer) { acceptUibc(it) }
     }
 
     private fun bind(port: Int): ServerSocket? = try {
@@ -193,7 +211,7 @@ class CarlinkConnection(
         listener.onState(State.CONNECTED, "CONTROL 通道已建立")
     }
 
-    /** 建立一条带加密的通用通道并加入管理列表（SENSOR/MEDIA/CERT/VIDEO 共用）。 */
+    /** 建立一条带加密的通用通道并加入管理列表（SENSOR/MEDIA/CERT/VIDEO/UIBC 共用）。 */
     private fun startExtraChannel(name: String, socket: Socket) {
         val ch = CarlinkChannel(
             name,
@@ -226,6 +244,11 @@ class CarlinkConnection(
         startExtraChannel("video", socket)
     }
 
+    /** UIBC（触摸/按键注入通道）。手机按下时的输入事件走这里，缺了它投屏画面点不动。 */
+    private fun acceptUibc(socket: Socket) {
+        startExtraChannel("uibc", socket)
+    }
+
     fun stop() {
         running = false
         runCatching { authServer?.close() }
@@ -234,6 +257,7 @@ class CarlinkConnection(
         runCatching { mediaServer?.close() }
         runCatching { certServer?.close() }
         runCatching { videoServer?.close() }
+        runCatching { uibcServer?.close() }
         auth?.close()
         control?.close()
         synchronized(extraChannels) {
@@ -241,7 +265,7 @@ class CarlinkConnection(
             extraChannels.clear()
         }
         authServer = null; controlServer = null; sensorServer = null
-        mediaServer = null; certServer = null; videoServer = null
+        mediaServer = null; certServer = null; videoServer = null; uibcServer = null
         auth = null; control = null
         sessionKey = null; uibcSessionKey = null
         // 承载方式可能已经变了（热点 ↔ 局域网），旧的候选口令不再可靠，重新轮换。
