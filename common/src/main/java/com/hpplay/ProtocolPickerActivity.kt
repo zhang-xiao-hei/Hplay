@@ -133,14 +133,22 @@ class ProtocolPickerActivity : LanguageAwareActivity() {
         requestProjectionPermissions()
     }
 
-    /** 与 CarPlay 启动时请求的权限集完全一致。 */
+    /**
+     * 投屏所需的运行权限。Android 12+ 上车机端要靠 BLE **广播**让手机发现自己
+     * （BLUETOOTH_ADVERTISE），只给 BLUETOOTH_CONNECT 的话广播会静默失败、手机根本搜不到车机；
+     * CarPlay/CarLife 那条路径（`BOOT_PERMISSIONS`）本来就是 CONNECT/ADVERTISE 一起申请的，
+     * 这里补齐，避免两条路径口径不一致。车机侧只广播不扫描，故不申请 BLUETOOTH_SCAN
+     * （它在 Android 13 上还会连带出定位权限要求）。
+     */
     private fun requiredProjectionPermissions(): List<String> = when {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> listOf(
             Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_ADVERTISE,
             Manifest.permission.NEARBY_WIFI_DEVICES,
         )
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> listOf(
             Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_ADVERTISE,
             Manifest.permission.ACCESS_COARSE_LOCATION,
             Manifest.permission.ACCESS_FINE_LOCATION,
         )
