@@ -1,5 +1,6 @@
 package com.hpplay.network
 
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.util.Log
@@ -19,6 +20,9 @@ object LocalBluetoothAddress {
     fun peek(): String? = cache.get()
 
     /** 12 位小写 hex，例如 "50c3a22608e2"；完全拿不到时返回 null。 */
+    // LOCAL_MAC_ADDRESS 是系统签名权限，普通应用永远拿不到；try/catch 之外再显式声明，
+    // 免得 lint 的 MissingPermission 仍然拦下这个平台调用。
+    @SuppressLint("MissingPermission")
     fun hex(context: Context, adapter: BluetoothAdapter?): String? {
         cache.get()?.let { return it }
         val fromRoot = readFromSystem()
