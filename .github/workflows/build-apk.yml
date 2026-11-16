@@ -106,6 +106,19 @@ jobs:
           done
           ls -lh apk-out/
 
+      - name: Verify signed APKs
+        if: steps.signing.outputs.prepared == 'true'
+        run: |
+          set -euo pipefail
+          # A release APK that is not signed cannot be installed, and an APK signed with the
+          # wrong key cannot upgrade over the one already on the head unit. Print the signer
+          # certificate of every APK so the fingerprint can be checked against the release key.
+          apksigner="${ANDROID_HOME}/build-tools/36.0.0/apksigner"
+          for apk in apk-out/*.apk; do
+            echo "=== $(basename "$apk")"
+            "${apksigner}" verify --verbose --print-certs "${apk}"
+          done
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
