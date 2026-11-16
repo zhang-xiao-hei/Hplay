@@ -24,6 +24,9 @@
     <string name="settings_log_upload_action">上传</string>
     <string name="settings_log_upload_url">上传地址</string>
     <string name="settings_log_upload_token">上传密钥</string>
+    <string name="settings_log_hint">日志文件位于 Android/data/&lt;包名&gt;/files/logs，最旧的会话会自动清理。</string>
+    <string name="settings_log_upload_description">把最近的会话打包发送到中转服务，由 Bark 通知你。</string>
+    <string name="settings_log_retention_description">把每个会话写入车机上的文件。保留 %1$d 个文件，%2$s。同时在屏幕上显示调试日志。</string>
     <string name="settings_category_android9">Android 9 兼容性</string>
 
     <string name="settings_transport_mode">CarPlay 连接方式</string>
