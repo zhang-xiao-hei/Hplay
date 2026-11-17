@@ -12,7 +12,11 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -30,6 +34,13 @@ import java.util.concurrent.atomic.AtomicInteger
  *  - 断链时关闭全部 socket、清空通道表、停掉读线程，否则残留 socket 会让后续建链
  *    永远失败（openChannels 见到非空 sockets 直接返回 false）；
  *  - onChannelsBroken 只回调一次，避免多条通道同时断开时重复通知上层。
+ *
+ * 建链提速（2026-11 修复）：
+ *  - 7 条通道改为**并发**建链（原来串行，每条 4s 超时，最坏 28s）；
+ *  - 单条超时 4s → 1.2s；
+ *  - 拿到一次广播后在该 IP 上连续重试 5 轮（300/500/800/1200ms 退避），覆盖手机启动
+ *    CarLife 服务的窗口；以前只试一次，端口未 listen 就放弃，等手机不再广播 → 死等；
+ *  - 建链放到独立执行器，UDP 发现线程始终在收包。
  */
 class CarLifeWire(
     private val listener: Listener,
@@ -56,6 +67,19 @@ class CarLifeWire(
     private val writeExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
         Thread(r, "CarLifeWriter").apply { isDaemon = true }
     }
+    /**
+     * 建链执行器（单线程）。
+     *
+     * 建链（含重试）必须离开 UDP 发现线程：以前 `openChannels` 直接在 receive 循环里串行连
+     * 7 个端口，每个 4s 超时，最坏 28s 收不了广播 —— 手机等不及就判定"找不到车机"放弃了。
+     */
+    private val connectExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "CarLifeConnect").apply { isDaemon = true }
+    }
+    /** 同一时刻只允许一轮建链，广播来得再密也不会互相踩。 */
+    private val connecting = AtomicBoolean(false)
+    /** 上一轮建链失败的原因（打在日志里，现场据此区分"手机没起服务"和"端口被拒")。 */
+    @Volatile private var lastFailure: String = ""
     private val sockets = HashMap<Int, Socket>()
     private val readers = CopyOnWriteArrayList<Thread>()
     private var udpSocket: DatagramSocket? = null
@@ -83,7 +107,7 @@ class CarLifeWire(
         if (stopped.get()) return false
         running.set(true)
         return try {
-            openChannels(InetAddress.getByName(phoneIp))
+            openChannelsWithRetry(InetAddress.getByName(phoneIp))
         } catch (t: Throwable) {
             Log.w(TAG, "connectTo $phoneIp failed", t)
             false
@@ -106,6 +130,7 @@ class CarLifeWire(
         stopped.set(true)
         running.set(false)
         runCatching { writeExecutor.shutdownNow() }
+        runCatching { connectExecutor.shutdownNow() }
         teardownLink()
         synchronized(lock) {
             runCatching { udpSocket?.close() }
@@ -181,7 +206,8 @@ class CarLifeWire(
                     continue
                 }
                 Log.d(TAG, "收到 UDP 广播: $phoneIp")
-                openChannels(InetAddress.getByName(phoneIp))
+                // 建链放到独立执行器：发现线程必须继续收包，否则重试期间来的广播全丢。
+                scheduleOpen(InetAddress.getByName(phoneIp))
             }
         } catch (e: SocketException) {
             if (running.get()) Log.w(TAG, "udp socket closed: ${e.message}")
@@ -207,21 +233,95 @@ class CarLifeWire(
     }
 
     // ---- 建链 ----
-    private fun openChannels(host: InetAddress): Boolean {
-        synchronized(lock) { if (sockets.isNotEmpty()) return false }
-        val opened = HashMap<Int, Socket>()
-        for ((channel, port) in CarLife.CHANNEL_PORTS) {
-            try {
-                val socket = Socket()
-                socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-                socket.tcpNoDelay = true
-                opened[channel] = socket
-            } catch (t: Throwable) {
-                Log.w(TAG, "connect channel $channel:$port failed: ${t.message}", t)
-                opened.values.forEach { runCatching { it.close() } }
-                return false
+
+    /** 把一轮建链排到执行器上（不阻塞 UDP 发现线程）。 */
+    private fun scheduleOpen(host: InetAddress) {
+        if (!connecting.compareAndSet(false, true)) {
+            Log.d(TAG, "link attempt already in flight; ignore broadcast from ${host.hostAddress}")
+            return
+        }
+        runCatching {
+            connectExecutor.execute {
+                try {
+                    openChannelsWithRetry(host)
+                } finally {
+                    connecting.set(false)
+                }
+            }
+        }.onFailure { connecting.set(false) }
+    }
+
+    /**
+     * 带重试的建链。
+     *
+     * 为什么必须重试：手机收到 UDP 广播后才去起 CarLife 的 7 个监听端口，这中间有 1–3s 窗口。
+     * 车机如果**只**在收到广播的那一瞬间试一次，端口还没 listen 就 connection refused，
+     * 之后手机不再广播（它已经在等连），车机就一直停在"等待连接"——用户看到的是
+     * 「手机显示找不到车机 / 车机一直转圈」，也就是"识别速度不够"。
+     *
+     * 现在：拿到一次广播后按 [LINK_RETRY_DELAYS_MS] 连续重试 [LINK_ATTEMPTS] 轮，
+     * 覆盖手机起服务的整个窗口，端口一就绪立刻连上。
+     */
+    private fun openChannelsWithRetry(host: InetAddress): Boolean {
+        for (attempt in 1..LINK_ATTEMPTS) {
+            if (!running.get() || stopped.get()) return false
+            synchronized(lock) { if (sockets.isNotEmpty()) return true }
+            val startedAt = System.currentTimeMillis()
+            val ok = openChannels(host)
+            val elapsed = System.currentTimeMillis() - startedAt
+            if (ok) {
+                Log.i(TAG, "link up in ${elapsed}ms (attempt $attempt/$LINK_ATTEMPTS, ${host.hostAddress})")
+                return true
+            }
+            Log.w(
+                TAG,
+                "link attempt $attempt/$LINK_ATTEMPTS failed in ${elapsed}ms: $lastFailure",
+            )
+            if (attempt < LINK_ATTEMPTS) {
+                val delay = LINK_RETRY_DELAYS_MS[minOf(attempt - 1, LINK_RETRY_DELAYS_MS.size - 1)]
+                runCatching { Thread.sleep(delay) }
             }
         }
+        Log.w(TAG, "link gave up after $LINK_ATTEMPTS attempts: $lastFailure")
+        return false
+    }
+
+    /**
+     * 一轮完整建链：7 条通道**并发**连。
+     *
+     * 以前是串行 for 循环，任何一条失败就整体放弃；在端口没就绪时最坏要等 7×超时 才回到
+     * 发现循环。并发之后一轮的耗时 ≈ 单条超时，重试才有意义（现场"识别慢"的直接原因）。
+     */
+    private fun openChannels(host: InetAddress): Boolean {
+        synchronized(lock) { if (sockets.isNotEmpty()) return true }
+        val opened = ConcurrentHashMap<Int, Socket>()
+        val failures = CopyOnWriteArrayList<String>()
+        val latch = CountDownLatch(CarLife.CHANNEL_PORTS.size)
+        for ((channel, port) in CarLife.CHANNEL_PORTS) {
+            Thread({
+                try {
+                    val socket = Socket()
+                    socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+                    socket.tcpNoDelay = true
+                    opened[channel] = socket
+                } catch (t: Throwable) {
+                    failures.add("$channel:$port ${t.javaClass.simpleName}(${t.message})")
+                } finally {
+                    latch.countDown()
+                }
+            }, "CarLifeConnect_$channel").apply { isDaemon = true; start() }
+        }
+        runCatching { latch.await(CONNECT_TIMEOUT_MS * 2L, TimeUnit.MILLISECONDS) }
+        if (opened.size != CarLife.CHANNEL_PORTS.size) {
+            lastFailure = if (failures.isEmpty()) {
+                "only ${opened.size}/${CarLife.CHANNEL_PORTS.size} channels connected"
+            } else {
+                failures.joinToString("; ")
+            }
+            opened.values.forEach { runCatching { it.close() } }
+            return false
+        }
+        lastFailure = ""
         val gen = generation.incrementAndGet()
         synchronized(lock) {
             if (!running.get()) {
@@ -320,6 +420,19 @@ class CarLifeWire(
         private const val TAG = "CarLifeWire"
         private const val MAX_PACKET = 10240       // 对齐引擎 SocketCommunicator.MAX_PACKET_SIZE
         private const val READ_BUFFER = 64 * 1024
-        private const val CONNECT_TIMEOUT_MS = 4000
+
+        /**
+         * 单条通道的连接超时。
+         *
+         * 从 4s 降到 1.2s：同网段/热点内连接失败基本都是"端口没人 listen"（立刻 RST），
+         * 拖到 4s 只会让一轮重试占掉整个手机等待窗口。
+         */
+        private const val CONNECT_TIMEOUT_MS = 1200
+
+        /** 一轮广播后最多试几轮（覆盖手机启动 CarLife 服务的那几秒）。 */
+        private const val LINK_ATTEMPTS = 5
+
+        /** 每轮之间的退避（毫秒），短的在前，保证端口一就绪就能连上。 */
+        private val LINK_RETRY_DELAYS_MS = longArrayOf(300, 500, 800, 1200)
     }
 }
