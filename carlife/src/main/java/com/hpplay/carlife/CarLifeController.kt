@@ -122,12 +122,21 @@ class CarLifeController(
     @Volatile private var stopping = false
     /** 本次会话是否曾经握手成功（回到前台时用它判断该不该立刻重连）。 */
     @Volatile private var everEstablished = false
+    /** 日间/夜间跟踪器：跟随系统深色模式 + 环境光，变化时通过 setDayNight 发给手机。 */
+    private var dayNight: com.hpplay.carlife.theme.CarLifeDayNight? = null
 
     /** 开始发现（UDP 7999）。 */
     fun start() {
         Log.i(TAG, "start")
         stopping = false
         listener.onStatusChanged("等待手机接入（UDP ${CarLife.BROADCAST_WIFI_PORT}）")
+        // 主题跟踪必须早于握手：握手完成（编码器协商）时要把当前主题发下去。
+        dayNight?.stop()
+        dayNight = com.hpplay.carlife.theme.CarLifeDayNight(
+            context,
+            onMode = { mode -> setDayNight(mode) },
+            log = { message -> listener.onDiagnostic("dayNight: $message") },
+        ).also { it.start() }
         wire.startDiscovery()
     }
 
@@ -200,6 +209,8 @@ class CarLifeController(
     fun stop(reason: String = "stopped") {
         Log.i(TAG, "stop: $reason")
         stopping = true
+        dayNight?.stop()
+        dayNight = null
         linkUp.set(false)
         teardownMedia()
         scheduler.shutdownNow()
@@ -853,6 +864,20 @@ class CarLifeController(
         // 手机就会一直续传 GOP 中间的 P 帧，新解码器永远等不到 IDR，表现为"回来就是黑屏"。
         if (created) requestPhoneKeyframe("decoder created")
         return videoDecoder?.isRunning == true
+    }
+
+    /**
+     * 通知手机切换日间/夜间主题。
+     *
+     * @param mode 0=日间（浅色）、1=夜间（深色）。
+     *
+     * 会话没建立时也只是记下当前值，等握手完成（编码器协商那一刻）自动补发，
+     * 所以宿主可以在 onCreate 里直接调，不必等 onSessionEstablished。
+     */
+    fun setDayNight(mode: Int) {
+        Log.i(TAG, "setDayNight -> $mode")
+        listener.onDiagnostic("theme mode -> $mode")
+        session.setThemeMode(mode)
     }
 
     /**
