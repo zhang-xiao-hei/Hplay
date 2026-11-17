@@ -97,6 +97,14 @@ class CarLifeSession(
         private set
 
     @Volatile private var encryptionEnabled = false
+    /**
+     * 车机当前要求的界面主题：0=浅色(日间)、1=深色(夜间)。
+     *
+     * 参考实现在编码器协商完成后下发一次 `HU_THEME_CHANGE{1}` 就再也不管了，于是车机
+     * 白天也停在夜间皮肤、用户/系统切换深色模式手机端也收不到。这里把主题变成可随时
+     * 改的状态：协商时按当前值下发，之后每次变化即时重发。
+     */
+    @Volatile private var themeMode: Int = 1
     @Volatile private var lastReceiveAt = System.currentTimeMillis()
     /** 与引擎 DatesKt.TIME_FORMAT_FOR_HMS 一致（yyyy-MM-dd-HH-mm-ss）。 */
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", Locale.US)
@@ -108,6 +116,37 @@ class CarLifeSession(
                 CarLife.CHANNEL_CMD,
                 CarLife.MSG_CMD_HU_PROTOCOL_VERSION,
                 CarlifeMessages.ProtocolVersion(PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR).encode(),
+            ),
+        )
+    }
+
+    /**
+     * 切换手机端界面主题（日间/夜间）。
+     *
+     * CarLife 的日夜切换不是车机自己变色，而是车机通过 CMD 通道
+     * `MSG_CMD_HU_THEME_CHANGE(0x18078)` 通知手机，由手机重绘界面。所以车机侧必须：
+     *  - 把当前主题记下来（重连后要重新告知）；
+     *  - 会话已建立时立刻发一帧，不能只在编码器协商那一刻发一次。
+     *
+     * @param mode 0=日间浅色，1=夜间深色（与参考实现取值一致）。
+     */
+    fun setThemeMode(mode: Int) {
+        val normalized = if (mode == 0) 0 else 1
+        if (normalized == themeMode && state == State.ESTABLISHED) {
+            // 值没变就不重复打扰手机；重连后由编码器协商那一步重新下发。
+            return
+        }
+        themeMode = normalized
+        Log.i(TAG, "theme mode -> $normalized (state=$state)")
+        if (state == State.ESTABLISHED) sendTheme()
+    }
+
+    /** 把当前主题发给手机（须已在会话建立、加密已就绪的状态下调用）。 */
+    private fun sendTheme() {
+        send(
+            cmdFrame(
+                CarLife.MSG_CMD_HU_THEME_CHANGE,
+                com.hpplay.carlife.proto.ProtoIO.Writer().apply { int32(1, themeMode) }.toByteArray(),
             ),
         )
     }
@@ -418,13 +457,9 @@ class CarLifeSession(
                 callback.onVideoEncoderInfo(info)
                 send(cmdFrame(CarLife.MSG_CMD_VIDEO_ENCODER_PAUSE, ByteArray(0)))
                 send(cmdFrame(CarLife.MSG_CMD_VIDEO_ENCODER_START, ByteArray(0)))
-                // 参考实现随后下发主题（0x18078 {themeModes=1}），手机据此切深色/浅色皮肤。
-                send(
-                    cmdFrame(
-                        CarLife.MSG_CMD_HU_THEME_CHANGE,
-                        com.hpplay.carlife.proto.ProtoIO.Writer().apply { int32(1, 1) }.toByteArray(),
-                    ),
-                )
+                // 参考实现随后下发主题（0x18078），手机据此切深色/浅色皮肤。
+                // 这里下发的是**当前**主题（跟随车机深色模式/环境光/外部指令），不再是写死的 1。
+                sendTheme()
             }
         }
     }
