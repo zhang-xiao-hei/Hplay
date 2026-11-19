@@ -2589,6 +2589,19 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
                     carlinkBand = if (index == 1) "2.4g" else "5g"
                     markSettingsDirty()
                 },
+                // 投屏界面叠层控件（「退出」/「设置」）的显隐与像素级位置。
+                // CarLink 宿主连接成功后会在画面上叠这两个按钮，不同车机分辨率/状态栏高度不同，
+                // 所以把「显示不显示」和「落在哪个像素」都交给用户在本行里调。
+                rows.action(
+                    labelText = getString(R.string.settings_carlink_overlay),
+                    description = getString(R.string.settings_carlink_overlay_desc),
+                    actions = listOf(
+                        SettingsRows.Action(
+                            label = getString(R.string.settings_carlink_overlay_open),
+                            primary = true,
+                        ) { openCarlinkOverlaySettings() },
+                    ),
+                ),
             )))
             body.addView(rows.section(null, listOf(
                 rows.note(getString(R.string.settings_protocol_tab_note)),
@@ -4390,6 +4403,25 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
      * decides which connection/hotspot options appear (五菱 gets force-5GHz / wireless-ADB; ordinary
      * head units only get plain hotspot modes). Picking a model seeds the recommended defaults.
      */
+    /**
+     * 打开 CarLink「投屏界面按钮」设置页（显隐 + 像素级位置）。
+     *
+     * 该类属于 :carlink 模块，而 :carlink 依赖 :common（不能反向依赖），所以这里只能按
+     * **类名字符串**启动；类不存在（该机型没打包 CarLink 能力）时静默忽略，不影响设置页其它项。
+     */
+    private fun openCarlinkOverlaySettings() {
+        runCatching {
+            startActivity(
+                android.content.Intent().setClassName(
+                    this,
+                    "com.hpplay.carlink.CarlinkOverlaySettingsActivity",
+                ),
+            )
+        }.onFailure {
+            android.util.Log.w("CarPlayHost", "open carlink overlay settings failed", it)
+        }
+    }
+
     private fun buildCarModelRow(rows: SettingsRows): View {
         val options = listOf(
             CarModel.F510C to getString(R.string.settings_car_model_f510c),
