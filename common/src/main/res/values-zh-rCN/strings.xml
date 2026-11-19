@@ -396,6 +396,9 @@
     <string name="settings_carlink_band_desc">5 GHz（36 信道）速度更快；手机连不上热点时切到 2.4 GHz 兜底。</string>
     <string name="settings_carlink_band_5g">5 GHz</string>
     <string name="settings_carlink_band_24g">2.4 GHz</string>
+<string name="settings_carlink_overlay">投屏界面按钮</string>
+<string name="settings_carlink_overlay_desc">连接成功后是否显示「退出」「设置」两个按钮，以及各自落在屏幕上的具体像素位置。</string>
+<string name="settings_carlink_overlay_open">调整</string>
     <string name="settings_carlink_mode">连接方式</string>
     <string name="settings_carlink_mode_desc">热点：Hplay 自己开热点，手机连车机热点。局域网直连：Hplay 自动打开车机 Wi-Fi 并加入现有网络（手机和车机连同一个第三方 Wi-Fi）。</string>
     <string name="settings_carlink_mode_ap">热点</string>
