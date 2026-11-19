@@ -1,0 +1,32 @@
+name: apply-carlink-overlay-patch
+
+# 一次性脚手架：把 .github/patches/carlink-overlay.patch 应用到 CarlinkHostActivity.kt，
+# 提交后自动删除本工作流与补丁文件，避免长期留在仓库里。
+on:  push:
+    paths:
+      - '.github/patches/carlink-overlay.patch'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Apply patch
+        run: git apply --verbose .github/patches/carlink-overlay.patch
+
+      - name: Commit and clean up
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -q .github/patches/carlink-overlay.patch
+          git rm -q .github/workflows/apply-carlink-overlay-patch.yml
+          git add -A
+          git commit -m "feat(carlink): 投屏页应用「退出/设置」显隐与像素位置"
+          git push

@@ -1,0 +1,149 @@
+diff --git a/carlink/src/main/java/com/hpplay/carlink/CarlinkHostActivity.kt b/carlink/src/main/java/com/hpplay/carlink/CarlinkHostActivity.kt
+index bca039e..93be6ce 100644
+--- a/carlink/src/main/java/com/hpplay/carlink/CarlinkHostActivity.kt
++++ b/carlink/src/main/java/com/hpplay/carlink/CarlinkHostActivity.kt
+@@ -53,6 +53,10 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
+     private var switchProtocolButton: TextView? = null
+     /** Top-left "exit" link — shown once the phone is linked so the user can leave the cast screen. */
+     private var exitLinkButton: TextView? = null
++    /** Top-right settings gear — 长按它进入「投屏界面按钮」设置（显隐 + 像素位置）。 */
++    private var settingsGearButton: android.widget.ImageButton? = null
++    /** 最近一次已下发给手机的日间/夜间（null = 本次连接还没发过）。 */
++    @Volatile private var lastDayNightNotify: Boolean? = null
+     private var palette: SettingsPalette = SettingsPalette.of(true)
+     private var videoReady = false
+     private var hotspot: CarlinkHotspot? = null
+@@ -240,12 +244,21 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
+             }
+             contentDescription = getString(R.string.settings_open)
+             setOnClickListener { openSettings() }
++            // 长按进入 CarLink 专属的「投屏界面按钮」设置：两个按钮显示与否 + 像素级位置。
++            setOnLongClickListener {
++                com.hpplay.SessionLogger.log("carlink", "open overlay settings (gear long-press)")
++                startActivity(
++                    Intent(this@CarlinkHostActivity, CarlinkOverlaySettingsActivity::class.java),
++                )
++                true
++            }
+         }
+         root.addView(
+             gear,
+             FrameLayout.LayoutParams(dp(48), dp(48), Gravity.TOP or Gravity.END)
+                 .apply { topMargin = dp(72); marginEnd = dp(16) },
+         )
++        this.settingsGearButton = gear
+         attachThreeFingerSettingsGesture(root)
+ 
+         // Status rail: reserve its strip and inset the video surface, so the ICCOA stream is laid out
+@@ -329,8 +342,11 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
+                     card.visibility = View.GONE
+                     // 链接成功后隐藏右上角「切换协议」按钮，避免驾驶中误触。
+                     switchProtocolButton?.visibility = View.GONE
+-                    // 同时给出左上角的「退出」链接，让用户能主动断开投屏。
+-                    exitLinkButton?.visibility = View.VISIBLE
++                    // 「退出」「设置」是否出现、落在哪个像素，全部由用户设置在 [applyOverlayPrefs] 决定。
++                    applyOverlayPrefs()
++                    // 连接一建立就把当前明暗下发给手机（参考 APP 的 HU_SEND_CARLINK_SWITCH_DAY_NIGHT_INFO）。
++                    lastDayNightNotify = null
++                    notifyDayNight()
+                 }
+             }
+         }
+@@ -466,6 +482,9 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
+ 
+     override fun onResume() {
+         super.onResume()
++        // 用户在「投屏界面按钮」设置里改了显隐/位置，回到投屏页立即生效。
++        applyOverlayPrefs()
++        notifyDayNight()
+         rootViewRef?.let { r ->
+             videoViewRef?.let { v ->
+                 pillViewRef?.let { p -> applyStatusRail(r, v, p) }
+@@ -761,8 +780,85 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
+     private fun updateSwitchProtocolVisibility() {
+         switchProtocolButton?.visibility =
+             if (videoReady) View.GONE else View.VISIBLE
+-        exitLinkButton?.visibility =
+-            if (videoReady) View.VISIBLE else View.GONE
++        applyOverlayPrefs()
++    }
++
++    /**
++     * 应用「投屏界面按钮」设置：显隐 + 像素级位置。
++     *
++     * 两件事分开：**显示与否**只看用户在设置里的开关（连接成功后才有意义），
++     * **位置**如果用户填了绝对像素就用像素，没填（-1）就回落到内置 dp 布局。
++     * 每次回到本页（onResume）都会重算，用户在设置里改完不必重启投屏。
++     */
++    private fun applyOverlayPrefs() {
++        val overlay = com.hpplay.CarlinkOverlayPrefs.load(this)
++        exitLinkButton?.let { exit ->
++            val lp = exit.layoutParams as? FrameLayout.LayoutParams ?: return@let
++            if (overlay.exitX >= 0) {
++                lp.gravity = Gravity.TOP or Gravity.START
++                lp.leftMargin = overlay.exitX
++                lp.marginStart = 0
++                lp.rightMargin = 0
++            } else {
++                lp.gravity = Gravity.TOP or Gravity.START
++                lp.leftMargin = dp(16)
++                lp.marginStart = dp(16)
++            }
++            lp.topMargin = if (overlay.exitY >= 0) overlay.exitY else dp(14)
++            exit.layoutParams = lp
++            val visible = videoReady && overlay.showExit
++            exit.visibility = if (visible) View.VISIBLE else View.GONE
++        }
++        settingsGearButton?.let { gear ->
++            val lp = gear.layoutParams as? FrameLayout.LayoutParams ?: return@let
++            if (overlay.settingsX >= 0) {
++                // 用户给了绝对像素：改成「距屏幕左侧 X」定位，右对齐偏移全部清零。
++                lp.gravity = Gravity.TOP or Gravity.START
++                lp.leftMargin = overlay.settingsX
++                lp.marginStart = 0
++                lp.marginEnd = 0
++                lp.rightMargin = 0
++            } else {
++                // 默认：右上角第二行（距右侧 16dp）。
++                lp.gravity = Gravity.TOP or Gravity.END
++                lp.leftMargin = 0
++                lp.marginStart = 0
++                lp.marginEnd = dp(16)
++            }
++            lp.topMargin = if (overlay.settingsY >= 0) overlay.settingsY else dp(72)
++            gear.layoutParams = lp
++            val visible = videoReady && overlay.showSettings
++            gear.visibility = if (visible) View.VISIBLE else View.GONE
++        }
++    }
++
++    /**
++     * 把当前明暗通知给手机（CONTROL 通道 15 / notify_switch_day_or_night）。
++     *
++     * 参考 APP 把这条称为 `HU_SEND_CARLINK_SWITCH_DAY_NIGHT_INFO`：**车机判定**，手机照着重绘。
++     * 之前本宿主从不发这条，所以手机端一直停在自己的默认主题上，车机切深色/进隧道毫无反应。
++     */
++    private fun notifyDayNight(force: Boolean = false) {
++        val night = (resources.configuration.uiMode and
++            android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
++            android.content.res.Configuration.UI_MODE_NIGHT_YES
++        val day = !night
++        if (!force && lastDayNightNotify == day) return
++        val sent = controller?.sendDayNight(day) ?: false
++        if (sent) {
++            lastDayNightNotify = day
++            com.hpplay.SessionLogger.log("carlink", "notify day/night ${if (day) "DAY" else "NIGHT"}")
++        }
++    }
++
++    /** 系统深色/浅色切换（宿主已声明 uiMode configChanges，不会重建页面）。 */
++    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
++        super.onConfigurationChanged(newConfig)
++        val night = (newConfig.uiMode and
++            android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
++            android.content.res.Configuration.UI_MODE_NIGHT_YES
++        palette = SettingsPalette.of(night)
++        notifyDayNight()
+     }
+ 
+     /**
