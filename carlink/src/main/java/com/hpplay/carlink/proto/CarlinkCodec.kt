@@ -42,6 +42,26 @@ object CarlinkCodec {
             .setHeartbeat(UCarProto.Heartbeat.newBuilder().setTimestamp(ts))
             .build()
 
+    /**
+     * 车机 → 手机：当前界面该用日间还是夜间。
+     *
+     * 对应 ICCOA `ControlIndex` 的字段 15 `notify_switch_day_or_night`（Mode: DAY=1 / NIGHT=2）。
+     * 参考 APP（Wcast 互联）把这条称为 `HU_SEND_CARLINK_SWITCH_DAY_NIGHT_INFO`：**由车机判定**，
+     * 手机只负责按通知重绘。所以车机必须在连接建立时下发一次、之后每次明暗变化再下发。
+     */
+    fun dayNightNotify(day: Boolean): UCarProto.ControlIndex =
+        UCarProto.ControlIndex.newBuilder()
+            .setNotifySwitchDayOrNight(
+                UCarProto.NotifySwitchDayOrNight.newBuilder().setMode(
+                    if (day) {
+                        UCarProto.NotifySwitchDayOrNight.Mode.DAY
+                    } else {
+                        UCarProto.NotifySwitchDayOrNight.Mode.NIGHT
+                    },
+                ),
+            )
+            .build()
+
     fun portResponse(result: UCarProto.GetPortResponse.Result, port: Int): UCarProto.ControlIndex =
         UCarProto.ControlIndex.newBuilder()
             .setGetPortResponse(

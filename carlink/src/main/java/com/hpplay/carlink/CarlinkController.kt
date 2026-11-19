@@ -52,7 +52,7 @@ class CarlinkController(
     }
 
     /**
-     * 启动连接层（监听 AUTH/CONTROL/... 六个端口）与视频 sink。
+     * 启动连接层（监听 AUTH/CONTROL/... 七个端口）与视频 sink。
      *
      * 幂等：重复调用不会重复绑定端口。
      */
@@ -112,6 +112,11 @@ class CarlinkController(
         runCatching { SinkNative.stop(host) }
         phoneIp = null
     }
+
+    /**
+     * 通知手机切换日间/夜间。会话没建立时返回 false（宿主可在连接建立后再发一次）。
+     */
+    fun sendDayNight(day: Boolean): Boolean = connection?.sendDayNight(day) ?: false
 
     fun stop() {
         started = false

@@ -16,10 +16,6 @@ import java.net.Socket
  * 车机 = TCP 服务端（与 libovmsink.so 作为 RTSP 客户端相对）。手机连入 AUTH 完成握手后，
  * 拿到手机 IP（= 视频 RTSP 源 host）与 AES 会话密钥；随后 CONTROL/SENSOR/MEDIA/CERT/VIDEO
  * 通道用该密钥加密通信。
- *
- * 端口集合逐字节对齐蒲公英：pgy 的 I0/g、U0/a、a1/b、T0/m 分别监听 AUTH/CONTROL/VIDEO/
- * SENSOR/MEDIA/CERT 六个端口；此前只绑了 4 个，缺 VIDEO(57259) 与 CERT(57249) 会导致手机
- * 连这两端口时 connection refused。
  */
 class CarlinkConnection(
     private val config: CarlinkControl.CarConfig,
@@ -248,6 +244,13 @@ class CarlinkConnection(
     private fun acceptUibc(socket: Socket) {
         startExtraChannel("uibc", socket)
     }
+
+    /**
+     * 通知手机日间/夜间（CONTROL 通道 15）。未建立 CONTROL 时返回 false，调用方稍后重发即可。
+     *
+     * 参考 APP 的行为是"车机说了算"：连接一建立就发一次当前主题，之后明暗变化即时补发。
+     */
+    fun sendDayNight(day: Boolean): Boolean = control?.sendDayNight(day) ?: false
 
     fun stop() {
         running = false

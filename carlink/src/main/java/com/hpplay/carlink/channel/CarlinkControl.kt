@@ -14,7 +14,7 @@ import java.net.Socket
  *
  * method 号即 ControlIndex 字段号：
  *  1=heartbeat 2=get_port_request 3=get_port_response 24=get_ucar_config_request
- *  25=get_ucar_config_response 23=disconnect
+ *  25=get_ucar_config_response 23=disconnect 15=notify_switch_day_or_night
  */
 class CarlinkControl(
     private val socket: Socket,
@@ -131,5 +131,36 @@ class CarlinkControl(
         channel?.send(ChannelCategory.CONTROL, 1, CarlinkCodec.encodeControl(CarlinkCodec.heartbeat(System.currentTimeMillis() / 1000)))
     }
 
+    /**
+     * 通知手机切换日间/夜间（ControlIndex 字段 15）。
+     *
+     * 参考 APP 里这条叫 `HU_SEND_CARLINK_SWITCH_DAY_NIGHT_INFO`：车机判定明暗、手机照着重绘。
+     * 之前本模块只在 GetUCarConfigResponse 里回了静态能力，**从不发**这条 —— 于是手机端
+     * 永远停在它自己的默认主题上，车机切深色/进隧道都没反应。
+     *
+     * @return false 表示 CONTROL 通道还没建立（握手未完成），调用方可稍后重试。
+     */
+    fun sendDayNight(day: Boolean): Boolean {
+        val ch = channel ?: return false
+        val sent = runCatching {
+            ch.send(
+                ChannelCategory.CONTROL,
+                METHOD_SWITCH_DAY_NIGHT,
+                CarlinkCodec.encodeControl(CarlinkCodec.dayNightNotify(day)),
+                MsgType.SEND,
+            )
+        }.isSuccess
+        Log.i(tag, "notify day/night -> ${if (day) "DAY" else "NIGHT"} sent=$sent")
+        runCatching {
+            com.hpplay.SessionLogger.log("carlink", "notify day/night ${if (day) "DAY" else "NIGHT"}")
+        }
+        return sent
+    }
+
     fun close() = channel?.close() ?: Unit
+
+    companion object {
+        /** ControlIndex 字段 15：notify_switch_day_or_night（method 号即字段号）。 */
+        private const val METHOD_SWITCH_DAY_NIGHT = 15
+    }
 }

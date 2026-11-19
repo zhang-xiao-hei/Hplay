@@ -29,6 +29,14 @@
             android:screenOrientation="fullSensor"
             android:theme="@style/Theme.Hplay" />
 
+        <!-- CarLink 投屏界面按钮设置：退出/设置是否显示 + 像素级位置（长按投屏页齿轮进入）。 -->
+        <activity
+            android:name="com.hpplay.carlink.CarlinkOverlaySettingsActivity"
+            android:exported="false"
+            android:configChanges="density|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:screenOrientation="fullSensor"
+            android:theme="@style/Theme.Hplay" />
+
         <!-- 常驻前台服务：钉住进程，保证切到后台后 BLE 广播与热点仍在线。 -->
         <service
             android:name="com.hpplay.carlink.CarlinkKeepAliveService"
