@@ -396,6 +396,9 @@
     <string name="settings_carlink_band_desc">5 GHz (channel 36) is faster; switch to 2.4 GHz if the phone cannot join the hotspot.</string>
     <string name="settings_carlink_band_5g">5 GHz</string>
     <string name="settings_carlink_band_24g">2.4 GHz</string>
+<string name="settings_carlink_overlay">Cast screen buttons</string>
+<string name="settings_carlink_overlay_desc">Whether the Exit and Settings buttons appear after the phone connects, and the exact pixel position of each.</string>
+<string name="settings_carlink_overlay_open">Adjust</string>
     <string name="settings_carlink_mode">Connection mode</string>
     <string name="settings_carlink_mode_desc">Hotspot: Hplay creates the Wi-Fi AP the phone joins. Same LAN: Hplay turns the head unit Wi-Fi on and joins the existing network (both devices on one third-party Wi-Fi).</string>
     <string name="settings_carlink_mode_ap">Hotspot</string>
