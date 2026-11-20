@@ -1479,6 +1479,15 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
         )
         val allCategories = listOf(
             connectionEntry,
+            // 「投屏界面按钮」放进共享设置宿主：三种协议页签下都显示，
+            // 不依赖 CarLink 页签，避免用户从任意入口进设置时看不到这一项。
+            CategoryEntry(
+                getString(R.string.settings_overlay_section),
+                getString(R.string.settings_overlay_section_sub),
+                buildOverlayCategory(),
+                R.drawable.ic_nav_display,
+                null,
+            ),
             CategoryEntry(
                 getString(R.string.settings_category_display),
                 getString(R.string.settings_category_display_sub),
@@ -2589,19 +2598,7 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
                     carlinkBand = if (index == 1) "2.4g" else "5g"
                     markSettingsDirty()
                 },
-                // 投屏界面叠层控件（「退出」/「设置」）的显隐与像素级位置。
-                // CarLink 宿主连接成功后会在画面上叠这两个按钮，不同车机分辨率/状态栏高度不同，
-                // 所以把「显示不显示」和「落在哪个像素」都交给用户在本行里调。
-                rows.action(
-                    labelText = getString(R.string.settings_carlink_overlay),
-                    description = getString(R.string.settings_carlink_overlay_desc),
-                    actions = listOf(
-                        SettingsRows.Action(
-                            label = getString(R.string.settings_carlink_overlay_open),
-                            primary = true,
-                        ) { openCarlinkOverlaySettings() },
-                    ),
-                ),
+
             )))
             body.addView(rows.section(null, listOf(
                 rows.note(getString(R.string.settings_protocol_tab_note)),
@@ -3647,6 +3644,63 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
      * The "General" category: identity/appearance (formerly the Identity category), plus the two
      * everyday housekeeping switches (debug logs, open system Bluetooth) and the destructive exit.
      */
+    /**
+     * 共享设置宿主里的「投屏界面按钮」分类：CarPlay / CarLife / CarLink 三种页签下都会显示。
+     * 内容取自 CarlinkOverlayPrefs：连接成功后「退出」「设置」两个悬浮按钮是否出现，
+     * 以及两个按钮的绝对像素位置（AUTO=-1 表示跟随宿主默认布局）。
+     */
+    private fun buildOverlayCategory(): View {
+        val rows = SettingsRows(this, palette)
+        val body = settingsBody()
+        val overlay = com.hpplay.CarlinkOverlayPrefs.load(this)
+        body.addView(rows.section(getString(R.string.settings_overlay_section), listOf(
+            rows.switch(
+                labelText = getString(R.string.settings_overlay_show_exit),
+                description = getString(R.string.settings_overlay_show_exit_desc),
+                checked = overlay.showExit,
+            ) { checked ->
+                com.hpplay.CarlinkOverlayPrefs.save(
+                    this,
+                    com.hpplay.CarlinkOverlayPrefs.load(this).copy(showExit = checked),
+                )
+                appendLog("overlay: exit button " + (if (checked) "shown" else "hidden"))
+            },
+            rows.switch(
+                labelText = getString(R.string.settings_overlay_show_settings),
+                description = getString(R.string.settings_overlay_show_settings_desc),
+                checked = overlay.showSettings,
+            ) { checked ->
+                com.hpplay.CarlinkOverlayPrefs.save(
+                    this,
+                    com.hpplay.CarlinkOverlayPrefs.load(this).copy(showSettings = checked),
+                )
+                appendLog("overlay: settings button " + (if (checked) "shown" else "hidden"))
+            },
+            rows.action(
+                labelText = getString(R.string.settings_overlay_adjust),
+                description = getString(R.string.settings_overlay_adjust_desc),
+                actions = listOf(
+                    SettingsRows.Action(
+                        label = getString(R.string.settings_carlink_overlay_open),
+                        primary = true,
+                    ) { openCarlinkOverlaySettings() },
+                ),
+            ),
+            rows.action(
+                labelText = getString(R.string.settings_overlay_reset),
+                description = null,
+                actions = listOf(
+                    SettingsRows.Action(
+                        label = getString(R.string.settings_overlay_reset),
+                    ) {
+                        com.hpplay.CarlinkOverlayPrefs.reset(this)
+                        appendLog("overlay: positions reset to host defaults")
+                    },
+                ),
+            ),
+        )))
+        return body
+    }
     private fun buildGeneralCategory(): View {
         val rows = SettingsRows(this, palette)
         val body = settingsBody()
