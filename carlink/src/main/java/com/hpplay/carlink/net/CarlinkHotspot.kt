@@ -63,7 +63,10 @@ class CarlinkHotspot(private val context: Context) {
         // 默认 149（UNII-3）不少手机/地区不支持，手机连不上热点会表现为「输入验证码后连接失败」。
         // 固定用 36（UNII-1，几乎所有 5G 设备都支持）。
         val forced = com.hpplay.network.ForcedFiveGhzHotspotManager(ctx, preferredChannel = 36)
-        val prefer24 = com.hpplay.AirPlayPersistence.loadCarlinkBand(ctx) == "2.4g"
+        // ICCOA 手机（小米 CarWith / vivo / iQOO 等）大多只扫 2.4 GHz，5 GHz AP 在车机上又常因
+        // 射频/信道配置被改写而实际不广播，手机侧表现就是「未识别到车机热点」。
+        // 因此默认走 2.4 GHz（框架 LocalOnlyHotspot）；只有用户在设置里显式选「5 GHz」才走强制 5G。
+        val prefer24 = com.hpplay.AirPlayPersistence.loadCarlinkBand(ctx) != "5g"
         val forcedUsable = !prefer24 && runCatching {
             android.os.Build.VERSION.SDK_INT < 33 && forced.adbPort() > 0
         }.getOrDefault(false)
