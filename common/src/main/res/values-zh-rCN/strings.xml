@@ -399,6 +399,15 @@
 <string name="settings_carlink_overlay">投屏界面按钮</string>
 <string name="settings_carlink_overlay_desc">连接成功后是否显示「退出」「设置」两个按钮，以及各自落在屏幕上的具体像素位置。</string>
 <string name="settings_carlink_overlay_open">调整</string>
+    <string name="settings_overlay_section">投屏界面按钮</string>
+    <string name="settings_overlay_section_sub">连接成功后车机上叠加的「退出」「设置」按钮：显示开关 + 像素级位置</string>
+    <string name="settings_overlay_show_exit">显示「退出」按钮</string>
+    <string name="settings_overlay_show_exit_desc">关闭后投屏画面上不再叠加退出按钮，仍可用手势退出投屏。</string>
+    <string name="settings_overlay_show_settings">显示「设置」按钮</string>
+    <string name="settings_overlay_show_settings_desc">关闭后投屏画面上不再叠加设置按钮。</string>
+    <string name="settings_overlay_adjust">调整像素位置</string>
+    <string name="settings_overlay_adjust_desc">打开叠加层预览：拖动按钮，或直接填屏幕绝对像素坐标。</string>
+    <string name="settings_overlay_reset">恢复默认位置</string>
     <string name="settings_carlink_mode">连接方式</string>
     <string name="settings_carlink_mode_desc">热点：Hplay 自己开热点，手机连车机热点。局域网直连：Hplay 自动打开车机 Wi-Fi 并加入现有网络（手机和车机连同一个第三方 Wi-Fi）。</string>
     <string name="settings_carlink_mode_ap">热点</string>
