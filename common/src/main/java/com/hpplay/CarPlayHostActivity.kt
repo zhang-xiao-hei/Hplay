@@ -428,8 +428,8 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
     private var carlifeAudioStrategy = "CARLIFE_ENGINE"
     /** CarLink 承载方式：ap（车机热点）/ lan（同一局域网直连）。 */
     private var carlinkConnectionMode = "ap"
-    /** CarLink 热点频段：5g / 2.4g。 */
-    private var carlinkBand = "5g"
+    /** CarLink 热点频段：5g / 2.4g。默认 2.4g：绝大多数 ICCOA 手机只扫 2.4 GHz。 */
+    private var carlinkBand = "2.4g"
     /** settings-only 入口由宿主指定初始协议页签（CarLife/CarLink）。 */
     private var requestedSettingsProtocol: Protocol? = null
     /** 「通道配置」页签本次的改动，保存时落盘；取消则丢弃。 */
@@ -2577,12 +2577,12 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
                     description = getString(R.string.settings_carlink_band_desc),
                     options = listOf(
                         SettingsRows.Option(
-                            getString(R.string.settings_carlink_band_5g),
-                            carlinkBand != "2.4g",
+                            getString(R.string.settings_carlink_band_24g),
+                            carlinkBand != "5g",
                         ),
                         SettingsRows.Option(
-                            getString(R.string.settings_carlink_band_24g),
-                            carlinkBand == "2.4g",
+                            getString(R.string.settings_carlink_band_5g),
+                            carlinkBand == "5g",
                         ),
                     ),
                 ) { index ->
