@@ -626,6 +626,14 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
             return
         }
         if (hotspotStarting) return
+        startHotspotAsync(force24Ghz = false)
+    }
+
+    /**
+     * 真正开热点并下发 ServerInfo。
+     * [force24Ghz]=true 用于 5 GHz 热点没人 JOIN 时的自动回退：忽略用户频段设置，直接走 2.4 GHz。
+     */
+    private fun startHotspotAsync(force24Ghz: Boolean) {
         hotspotStarting = true
         runOnUiThread {
             statusPill?.text = getString(R.string.carlink_provisioning)
@@ -637,7 +645,7 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
             var info: CarlinkHotspot.Info? = null
             for (attempt in 1..2) {
                 val h = CarlinkHotspot(this).also { hotspot = it }
-                info = h.startBlocking(CarlinkHotspot.DEFAULT_TIMEOUT_MILLIS, releaseSta = true)
+                info = h.startBlocking(CarlinkHotspot.DEFAULT_TIMEOUT_MILLIS, releaseSta = true, force24Ghz = force24Ghz)
                 if (info != null) break
                 appendLog("CarLink hotspot attempt $attempt failed")
                 runCatching { h.stop() }
@@ -661,8 +669,68 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
                 )
                 bleServer?.let { pushServerInfo(it, up) }
                 startDiscoveryResponder(up)
+                watchApJoin(up)
             }
         }, "carlink-hotspot").start()
+    }
+
+    /**
+     * 手机是否真的接进了车机热点：读 /proc/net/arp 里热点网段的条目。
+     * 手机 JOIN 成功后才会留下 ARP 记录；没有记录就说明卡在手机侧 Wi-Fi 入网
+     *（「连接失败，请尝试重启手机 wlan」正是这个阶段）。
+     */
+    private fun hasApClient(apIp: String): Boolean = runCatching {
+        val prefix = apIp.substringBeforeLast('.', "192.168.43")
+        java.io.File("/proc/net/arp").readLines().drop(1).any { line ->
+            val cols = line.trim().split(Regex("\\s+"))
+            cols.size >= 4 &&
+                cols[3] != "00:00:00:00:00:00" &&
+                cols[0].startsWith("$prefix.") &&
+                cols[0] != apIp
+        }
+    }.getOrDefault(false)
+
+    @Volatile private var joinWatchSeq = 0
+
+    /**
+     * 热点起来后盯 20 秒：手机一直没 JOIN 进来时——
+     *   - 5 GHz 热点：自动回退 2.4 GHz 重开一次并重发 ServerInfo（ICCOA 手机大量只认 2.4 GHz）；
+     *   - 2.4 GHz 热点：落一条可直接比对的现场日志（手机拿到的 ssid/psk 长度/信道）。
+     */
+    private fun watchApJoin(info: CarlinkHotspot.Info) {
+        joinWatchSeq += 1
+        val seq = joinWatchSeq
+        Thread({
+            var joined = false
+            for (i in 0 until 40) {
+                if (seq != joinWatchSeq) return@Thread
+                if (hasApClient(info.ipAddress)) {
+                    joined = true
+                    break
+                }
+                runCatching { Thread.sleep(500L) }
+            }
+            if (joined) {
+                appendLog("AP client joined the head-unit hotspot (ap=${info.ipAddress})")
+                return@Thread
+            }
+            if (info.freqMhz >= 4900) {
+                appendLog(
+                    "No phone joined the 5 GHz AP in 20s; fallback to 2.4 GHz " +
+                        "(ssid='${info.ssid}' freq=${info.freqMhz} channel=${info.channel})",
+                )
+                hotspotInfo = null
+                runCatching { hotspot?.stop() }
+                hotspotStarting = false
+                startHotspotAsync(force24Ghz = true)
+            } else {
+                appendLog(
+                    "No phone joined the 2.4 GHz AP in 20s: phone Wi-Fi join failed " +
+                        "(ssid='${info.ssid}' pskLen=${info.passphrase.length} " +
+                        "channel=${info.channel} band=" + (if (info.freqMhz >= 4900) 1 else 0) + ")",
+                )
+            }
+        }, "carlink-join-watch").start()
     }
 
     /**
