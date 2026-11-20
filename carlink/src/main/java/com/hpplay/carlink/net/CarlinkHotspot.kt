@@ -45,7 +45,7 @@ class CarlinkHotspot(private val context: Context) {
      * [releaseSta]=true 时先断开当前 WiFi 客户端再开热点（单射频车机 STA+AP 互斥，必须这样）。
      * 热点关闭或启动失败时会自动把车机连回原 WiFi。
      */
-    fun startBlocking(timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS, releaseSta: Boolean = false): Info? {
+    fun startBlocking(timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS, releaseSta: Boolean = false, force24Ghz: Boolean = false): Info? {
         val ctx = context.applicationContext
         if (releaseSta) {
             runCatching {
@@ -66,7 +66,7 @@ class CarlinkHotspot(private val context: Context) {
         // ICCOA 手机（小米 CarWith / vivo / iQOO 等）大多只扫 2.4 GHz，5 GHz AP 在车机上又常因
         // 射频/信道配置被改写而实际不广播，手机侧表现就是「未识别到车机热点」。
         // 因此默认走 2.4 GHz（框架 LocalOnlyHotspot）；只有用户在设置里显式选「5 GHz」才走强制 5G。
-        val prefer24 = com.hpplay.AirPlayPersistence.loadCarlinkBand(ctx) != "5g"
+        val prefer24 = force24Ghz || com.hpplay.AirPlayPersistence.loadCarlinkBand(ctx) != "5g"
         val forcedUsable = !prefer24 && runCatching {
             android.os.Build.VERSION.SDK_INT < 33 && forced.adbPort() > 0
         }.getOrDefault(false)
@@ -86,9 +86,11 @@ class CarlinkHotspot(private val context: Context) {
                 "hotspot up: ssid='${info.ssid}' ip=$ip iface=${info.interfaceName} " +
                     "band=${info.bandLabel} channel=${info.channel}",
             )
+            // 框架/厂商返回的 SSID 有时带引号（原样下发给手机就成了"永远匹配不上的 SSID"），
+            // 这里统一去掉首尾引号；PSK 同理。
             Info(
-                ssid = info.ssid,
-                passphrase = info.passphrase,
+                ssid = info.ssid.trim('"'),
+                passphrase = info.passphrase.trim('"'),
                 ipAddress = ip,
                 mac = info.bssid ?: "",
                 freqMhz = info.frequencyMHz ?: 0,
