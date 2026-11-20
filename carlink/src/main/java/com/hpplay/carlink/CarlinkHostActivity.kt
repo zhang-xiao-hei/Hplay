@@ -377,6 +377,10 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
     private fun openSettings() {
         val intent = Intent(this, com.hpplay.CarPlayHostActivity::class.java)
             .putExtra(com.hpplay.EXTRA_SETTINGS_ONLY, true)
+            // 必须把页签也带过去：设置页默认按「上次选择的协议 / 默认协议」拼装分类，
+            // 不带这个 extra 就会落在 CarPlay 标签下，CarLink 专属分组（连接方式/频段/
+            // 投屏界面按钮）根本不渲染 —— 表现为「设置里看不到这个选项」。
+            .putExtra(com.hpplay.EXTRA_SETTINGS_PROTOCOL, com.hpplay.Protocol.CARLINK.name)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         runCatching { startActivity(intent) }
             .onFailure { Log.w(tag, "open settings failed: ${it.message}") }
@@ -525,6 +529,13 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
                     "BLE ClientInfo: id=${info.id} name=${info.name} type=${info.type} " +
                         "pinCodeOrAuthentication=${info.pinCodeOrAuthentication}",
                 )
+                // 手机侧声明的频段/信道/机型决定它去扫哪个热点：记进会话日志，
+                // 以后「未识别到热点」就能直接比对，是车机下发错了还是手机扫错了。
+                appendLog(
+                    "ClientInfo <- phone: id='${info.id}' name='${info.name}' model='${info.model}' " +
+                        "type=${info.type} band=${info.band} channel=${info.channel} mac='${info.mac}' " +
+                        "manufactures='${info.manufactures ?: ""}'",
+                )
                 // 手机经 BLE 下发自己的配对码：把它显示到屏幕，并作为 AUTH 口令候选之一
                 //（见 authPinCandidates）。车机本地生成的那份仍然保留为另一个候选。
                 val code = info.pinCodeOrAuthentication?.trim()
@@ -620,23 +631,36 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
             statusPill?.text = getString(R.string.carlink_provisioning)
         }
         Thread({
-            val info = CarlinkHotspot(this).also { hotspot = it }
-                .startBlocking(CarlinkHotspot.DEFAULT_TIMEOUT_MILLIS, releaseSta = true)
+            // 单射频车机（MT8666 等）断 STA 后射频未必立刻空出来，第一次开热点可能仍报
+            // 「STA+AP 冲突」。这里最多试两次：失败后重新断一次 STA 再开，避免用户看到
+            // 一次偶发失败就被判定「热点不能用」。
+            var info: CarlinkHotspot.Info? = null
+            for (attempt in 1..2) {
+                val h = CarlinkHotspot(this).also { hotspot = it }
+                info = h.startBlocking(CarlinkHotspot.DEFAULT_TIMEOUT_MILLIS, releaseSta = true)
+                if (info != null) break
+                appendLog("CarLink hotspot attempt $attempt failed")
+                runCatching { h.stop() }
+                if (attempt == 1) runCatching { Thread.sleep(2_000L) }
+            }
             hotspotInfo = info
             hotspotStarting = false
+            // 用不可变快照：局部 var 在线程里被赋值后，闭包里不能做智能转换。
+            val up = info
             runOnUiThread {
-                if (info == null) {
+                if (up == null) {
                     statusPill?.text = getString(R.string.carlink_hotspot_failed)
-                    appendLog("CarLink hotspot failed to start")
+                    appendLog("CarLink hotspot failed to start after 2 attempts")
                     return@runOnUiThread
                 }
-                statusPill?.text = getString(R.string.carlink_hotspot_ready, info.ssid)
+                statusPill?.text = getString(R.string.carlink_hotspot_ready, up.ssid)
                 appendLog(
-                    "CarLink hotspot up: ssid='${info.ssid}' ip=${info.ipAddress} " +
-                        "mac=${info.mac} channel=${info.channel}",
+                    "CarLink hotspot up: ssid='${up.ssid}' ip=${up.ipAddress} " +
+                        "mac=${up.mac} freq=${up.freqMhz} channel=${up.channel} " +
+                        "band=${if (up.freqMhz >= 4900) 1 else 0}",
                 )
-                bleServer?.let { pushServerInfo(it, info) }
-            startDiscoveryResponder(info)
+                bleServer?.let { pushServerInfo(it, up) }
+                startDiscoveryResponder(up)
             }
         }, "carlink-hotspot").start()
     }
@@ -959,6 +983,14 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
             band = if (info.freqMhz >= 4900) 1 else 0,
         )
         runCatching { ble.updateServerInfo(serverInfo) }
+        // 现场诊断用：手机报「未识别到热点」时，第一条要看的就是车机到底下发了什么
+        // SSID/频段/信道/IP —— 手机按这里的值去扫热点，值错了就永远扫不到。
+        appendLog(
+            "ServerInfo -> phone: name='${serverInfo.name}' ssid='${serverInfo.ssid}' " +
+                "pskLen=${serverInfo.psk.length} mac='${serverInfo.mac}' freq=${serverInfo.freq} " +
+                "channel=${serverInfo.channel} band=${serverInfo.band} ip=${serverInfo.ipAddress} " +
+                "port=${serverInfo.port} type=${serverInfo.type}",
+        )
     }
 
     private fun appendLog(message: String) {
