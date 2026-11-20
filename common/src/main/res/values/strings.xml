@@ -399,6 +399,15 @@
 <string name="settings_carlink_overlay">Cast screen buttons</string>
 <string name="settings_carlink_overlay_desc">Whether the Exit and Settings buttons appear after the phone connects, and the exact pixel position of each.</string>
 <string name="settings_carlink_overlay_open">Adjust</string>
+    <string name="settings_overlay_section">Cast screen buttons</string>
+    <string name="settings_overlay_section_sub">Exit and Settings buttons overlaid after connection: visibility switches + pixel positions</string>
+    <string name="settings_overlay_show_exit">Show "Exit" button</string>
+    <string name="settings_overlay_show_exit_desc">When off, the Exit button is not overlaid; swipe gestures still exit casting.</string>
+    <string name="settings_overlay_show_settings">Show "Settings" button</string>
+    <string name="settings_overlay_show_settings_desc">When off, the Settings button is not overlaid.</string>
+    <string name="settings_overlay_adjust">Adjust pixel position</string>
+    <string name="settings_overlay_adjust_desc">Opens the overlay preview: drag the buttons or type absolute screen pixel coordinates.</string>
+    <string name="settings_overlay_reset">Reset button positions</string>
     <string name="settings_carlink_mode">Connection mode</string>
     <string name="settings_carlink_mode_desc">Hotspot: Hplay creates the Wi-Fi AP the phone joins. Same LAN: Hplay turns the head unit Wi-Fi on and joins the existing network (both devices on one third-party Wi-Fi).</string>
     <string name="settings_carlink_mode_ap">Hotspot</string>
