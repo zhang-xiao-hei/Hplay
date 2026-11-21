@@ -15,9 +15,6 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import com.hpplay.CarlinkOverlayPrefs
 
 /**
@@ -266,12 +263,13 @@ class CarlinkOverlaySettingsActivity : com.hpplay.LanguageAwareActivity() {
 
     /** 本页要有系统栏：父页面（共享设置宿主）可能按投屏设置隐藏了状态栏/导航栏，
      *  那样子页面既没有返回键也没有可视出口。这里无条件把两条栏放回来。 */
+    @Suppress("DEPRECATION")
     private fun restoreSystemBars() {
+        // 这里不用 androidx.core：:carlink 只通过 implementation 依赖 :common，拿不到 androidx.core
+        // 的编译类路径（上一版就是因此编译失败）。平台 API 足够：清掉全屏标志、把系统栏设为可见。
         runCatching {
-            WindowCompat.setDecorFitsSystemWindows(window, true)
-            val controller = WindowInsetsControllerCompat(window, window.decorView)
-            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
-            controller.show(WindowInsetsCompat.Type.systemBars())
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN)
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
         }
     }
 
