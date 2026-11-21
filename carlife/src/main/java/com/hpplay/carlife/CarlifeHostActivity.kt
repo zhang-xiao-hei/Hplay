@@ -77,6 +77,12 @@ class CarlifeHostActivity : com.hpplay.LanguageAwareActivity() {
 
     private var activeVideoHeight = 0
     private var statusRailView: StatusRailView? = null
+    /** 启动打点起点（onCreate 第一行），用于把启动耗时拆成几段看到底慢在哪。 */
+    private var startupAt = 0L
+
+    private fun startupMillis(): Long =
+        if (startupAt <= 0L) 0L else android.os.SystemClock.elapsedRealtime() - startupAt
+
     private var railEdge: StatusRailEdge? = null
     private var railPanelWidth = 0
     private var railPanelHeight = 0
@@ -84,6 +90,8 @@ class CarlifeHostActivity : com.hpplay.LanguageAwareActivity() {
     @SuppressLint("SetTextI18n")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 现场反馈「CarLife 启动太久」，没有分段计时只能猜，这里把启动拆成几段时间写进会话日志。
+        startupAt = android.os.SystemClock.elapsedRealtime()
         window.addFlags(
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
                 WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD,
@@ -186,7 +194,10 @@ class CarlifeHostActivity : com.hpplay.LanguageAwareActivity() {
         )
 
         // 状态条要用真实窗口尺寸（不含系统栏）排版，等第一帧布局完成后再排。
-        root.post { layoutWithStatusRail() }
+        root.post {
+            layoutWithStatusRail()
+            carlifeLog("startup: first-layout " + startupMillis() + "ms")
+        }
         root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
             if (root.width != railPanelWidth || root.height != railPanelHeight) {
                 layoutWithStatusRail()
@@ -253,8 +264,10 @@ class CarlifeHostActivity : com.hpplay.LanguageAwareActivity() {
             activeAudioStrategy,
         )
         controller?.start()
+        carlifeLog("startup: controller-started " + startupMillis() + "ms")
         registerCarLifeUsb()
         applyPhoneIpHint(intent)
+        carlifeLog("startup: usb-receiver-registered " + startupMillis() + "ms")
     }
 
     /**
@@ -318,17 +331,29 @@ class CarlifeHostActivity : com.hpplay.LanguageAwareActivity() {
         // 注意：不能只找 accessory —— 开机时插着的是普通 Android 手机（尚未进入 accessory），
         // 也必须走 handleUsbDevice 去申请权限并发 AOA 切换请求，否则只能靠用户插拔一次触发
         // attach 广播才能连上（用户实测到的"开机插着必须插拔"就是这个原因）。
-        val existing = usbManager.deviceList.values.toList()
-        carlifeLog("startup usb scan: ${existing.size} device(s)")
-        existing.forEach { device ->
-            Log.i(
-                TAG,
-                "startup usb device ${device.deviceName} vid=0x${device.vendorId.toString(16)}" +
-                    " pid=0x${device.productId.toString(16)}",
+        // 枚举 + 逐设备探测（可能 openDevice / 发 AOA 控制请求）是重活，放主线程会直接拖慢首帧，
+        // 这里整段丢后台线程。requestPermission 本身是异步系统弹窗，不要求主线程。
+        Thread({
+            val scanAt = android.os.SystemClock.elapsedRealtime()
+            val existing = runCatching { usbManager.deviceList.values.toList() }
+                .getOrDefault(emptyList())
+            carlifeLog("startup usb scan: ${existing.size} device(s)")
+            existing.forEach { device ->
+                Log.i(
+                    TAG,
+                    "startup usb device ${device.deviceName} vid=0x${device.vendorId.toString(16)}" +
+                        " pid=0x${device.productId.toString(16)}",
+                )
+                runCatching { handleUsbDevice(usbManager, device) }
+                    .onFailure { Log.w(TAG, "startup usb probe failed: ${it.message}") }
+            }
+            runCatching { startUsbWatchdog(usbManager) }
+            carlifeLog(
+                "startup: usb-scan " +
+                    (android.os.SystemClock.elapsedRealtime() - scanAt) +
+                    "ms (at " + startupMillis() + "ms since onCreate)",
             )
-            handleUsbDevice(usbManager, device)
-        }
-        startUsbWatchdog(usbManager)
+        }, "carlife-usb-scan").start()
     }
 
     /**
@@ -501,7 +526,28 @@ class CarlifeHostActivity : com.hpplay.LanguageAwareActivity() {
         ) {
             return
         }
-        statusRailView?.let { root.removeView(it) }
+        // 状态条是 LingFans 整套视图（构造 + 数据拉取），主线程同步建会明显推迟等待页出现。
+        // 视频区/卡片/顶栏的让位已经在上面做完，这里只把「建视图」推到首帧之后。
+        root.postDelayed({
+            if (statusRailView != null && edge == railEdge &&
+                railPanelWidth == panelW && railPanelHeight == panelH
+            ) {
+                return@postDelayed
+            }
+            statusRailView?.let { root.removeView(it) }
+            attachStatusRail(edge, area, panelW, panelH)
+        }, RAIL_DEFER_MS)
+        return
+    }
+
+    /** 真正创建并挂上状态条；延后到首帧之后调用（见 [layoutWithStatusRail]）。 */
+    private fun attachStatusRail(
+        edge: StatusRailEdge,
+        area: com.hpplay.rail.ContentArea,
+        panelW: Int,
+        panelH: Int,
+    ) {
+        val root = rootView ?: return
         // 全幅状态条：横向贴边、不留左右 inset（与 CarPlay 宿主版式一致）。
         val vertical = !StatusRailSettings.isHorizontal(edge)
         val railWidth = if (vertical) panelW - area.width else panelW
@@ -867,6 +913,8 @@ class CarlifeHostActivity : com.hpplay.LanguageAwareActivity() {
         private const val MAX_AOA_IDLE_TIMEOUTS = 60
         private const val AOA_ENABLED = true
         private const val THREE_FINGER_SWIPE_DP = 60
+        /** 状态条延后挂载的延迟：先让等待页出第一帧，再建 LingFans 视图。 */
+        private const val RAIL_DEFER_MS = 700L
         /** 无 accessory 会话时的补扫间隔（毫秒）。 */
         private const val USB_WATCHDOG_MS = 10_000L
     }

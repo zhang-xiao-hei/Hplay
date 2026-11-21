@@ -137,7 +137,13 @@ class CarLifeController(
             onMode = { mode -> setDayNight(mode) },
             log = { message -> listener.onDiagnostic("dayNight: $message") },
         ).also { it.start() }
-        wire.startDiscovery()
+        // 7999 的 DatagramSocket 创建/绑定不在主线程做：部分车机上 bind 会阻塞上百毫秒，
+        // 挂在 onCreate 里就表现为「进 CarLife 要等一会儿才出画面」。
+        Thread({
+            runCatching { wire.startDiscovery() }
+                .onFailure { Log.w(TAG, "startDiscovery failed: ${it.message}") }
+            listener.onDiagnostic("discovery started off main thread")
+        }, "CarLifeDiscoveryStart").start()
     }
 
     /**
