@@ -53,7 +53,7 @@ object BluetoothLinkGuard {
         val entry = entries.getOrPut(address) { Entry() }
         when {
             entry.inFlight -> Begin.IN_FLIGHT
-            nowMs < entry.readyAt -> Begin.COOLDING_DOWN
+            nowMs < entry.readyAt -> Begin.COOLING_DOWN
             else -> {
                 entry.inFlight = true
                 Begin.STARTED
