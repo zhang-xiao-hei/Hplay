@@ -430,6 +430,8 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
     private var discoveryResponder: com.hpplay.carlink.net.CarlinkDiscoveryResponder? = null
     private var discoveryProbeCount = 0
     private var bluetoothStateReceiver: android.content.BroadcastReceiver? = null
+    /** 上一次因蓝牙重新打开而重建配网的时间（单调毫秒），用于吞掉重复的状态广播。 */
+    private var lastBluetoothOnRestartAt = 0L
     private var rootViewRef: FrameLayout? = null
     private var videoViewRef: TextureView? = null
     private var pillViewRef: View? = null
@@ -526,6 +528,12 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
      * 手机据此发现车机并写入 ClientInfo。热点在收到手机 ClientInfo 后自动开启（见 [ensureHotspotAndPush]）。
      */
     private fun startBleProvisioning() {
+        // 已经在配网中就不要重建：旧实例被 stop 掉会连带把广播身份块里的序列号翻一轮，
+        // 手机端就再弹一次连接提示。蓝牙状态广播重复投递时尤其明显。
+        if (bleServer != null) {
+            Log.i(tag, "BLE provisioning already running; skip duplicate start")
+            return
+        }
         val ble = CarlinkBleServer(this, object : CarlinkBleServer.Listener {
             override fun onPhoneConnected(name: String?) {
                 Log.i(tag, "BLE phone connected: $name")
@@ -1392,6 +1400,14 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
                     -1,
                 ) ?: return
                 if (state == android.bluetooth.BluetoothAdapter.STATE_ON) {
+                    // 部分 ROM 会把 STATE_ON 连投两次：3 秒内的重复广播直接忽略，
+                    // 否则每次重启都会换一个新广播序列号，手机上就多弹一次提示。
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (now - lastBluetoothOnRestartAt < 3_000L) {
+                        Log.i(tag, "Bluetooth STATE_ON duplicated; keep current BLE provisioning")
+                        return
+                    }
+                    lastBluetoothOnRestartAt = now
                     Log.i(tag, "Bluetooth turned on: restarting BLE provisioning")
                     runCatching { bleServer?.stop() }
                     bleServer = null

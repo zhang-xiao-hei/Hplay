@@ -59,6 +59,7 @@ import com.hpplay.network.WirelessHotspotBackend
 import com.hpplay.network.WirelessAdbEnabler
 import com.hpplay.network.mfiCertificateWifiP2pCredentials
 import com.hpplay.transport.BlockingDuplexByteStream
+import com.hpplay.transport.BluetoothLinkGuard
 import com.hpplay.transport.BluetoothRfcommDuplexStream
 import com.hpplay.transport.Ch341DeviceMatcher
 import com.hpplay.transport.Ch341I2cTransport
@@ -208,6 +209,8 @@ class CarPlayController(
     @Volatile private var hotspot: WirelessHotspotManager? = null
     @Volatile private var bonjour: CarPlayBonjour? = null
     @Volatile private var bluetoothSocket: BluetoothSocket? = null
+    /** 上一次推过 ConnectingBluetooth 的设备地址，用来吞掉同一台设备的重试状态。 */
+    @Volatile private var lastBluetoothConnectingAddress: String? = null
     @Volatile private var bluetoothStream: BluetoothRfcommDuplexStream? = null
     @Volatile private var wirelessTunnelChannel: Iap2Session? = null
     @Volatile private var activeMediaRemoteSession: Iap2Session? = null
@@ -1320,7 +1323,12 @@ class CarPlayController(
 
         val activeSocket = bluetoothSocket
         bluetoothSocket = null
-        if (activeSocket != null) closeBestEffort("wireless Bluetooth socket") { activeSocket.close() }
+        if (activeSocket != null) {
+            runCatching { activeSocket.remoteDevice?.address }.getOrNull()?.let {
+                BluetoothLinkGuard.markDisconnected(it)
+            }
+            closeBestEffort("wireless Bluetooth socket") { activeSocket.close() }
+        }
     }
 
     private fun startIphone() {
@@ -1861,40 +1869,88 @@ class CarPlayController(
     private fun connectWirelessBluetoothDevices(
         devices: List<BluetoothDevice>,
         generation: Int,
+        cooldownPass: Int = 0,
     ): Iap2Session {
         var lastFailure: Exception? = null
+        val skipped = mutableListOf<String>()
         for ((index, device) in devices.withIndex()) {
             if (isStaleWirelessRun(generation)) {
                 throw IOException("Wireless Bluetooth connection was cancelled")
             }
-            onStatus(CarPlayStatus.ConnectingBluetooth)
+            val address = device.address
+            when (BluetoothLinkGuard.beginConnect(address)) {
+                BluetoothLinkGuard.Begin.IN_FLIGHT -> {
+                    skipped += address
+                    debugLog("wireless RFCOMM skip $address: another attempt is already in flight")
+                    continue
+                }
+                BluetoothLinkGuard.Begin.COOLING_DOWN -> {
+                    skipped += address
+                    val wait = BluetoothLinkGuard.cooldownRemainingMs(address)
+                    debugLog(
+                        "wireless RFCOMM skip $address: cooling down $wait ms after a failed attempt",
+                    )
+                    continue
+                }
+                BluetoothLinkGuard.Begin.STARTED -> Unit
+            }
+            // 同一台手机在上一轮里刚失败过就跳过，不再对着一台连不上的手机狂连 ——
+            // 每次都重开 RFCOMM 会让系统蓝牙栈对同一台手机反复发「已连接/已断开」。
             debugLog(
                 "wireless RFCOMM attempt=${index + 1}/${devices.size} " +
-                    "name=${device.name ?: "unknown"} address=${device.address} " +
+                    "name=${device.name ?: "unknown"} address=$address " +
                     "uuid=$IAP2_IPHONE_UUID",
             )
             try {
+                announceConnectingBluetooth(address)
                 val socket = device
                     .createRfcommSocketToServiceRecord(UUID.fromString(IAP2_IPHONE_UUID))
                     .also { bluetoothSocket = it }
-                connectBluetoothSocket(socket, device.address)
+                connectBluetoothSocket(socket, address)
                 if (isStaleWirelessRun(generation)) {
+                    BluetoothLinkGuard.markAbandoned(address)
                     throw IOException("Wireless Bluetooth connection was cancelled")
                 }
-                debugLog("wireless RFCOMM connected address=${device.address}")
+                debugLog("wireless RFCOMM connected address=$address")
                 val stream = BluetoothRfcommDuplexStream(socket).also { bluetoothStream = it }
                 val channel = Iap2Session.openWireless(
                     stream,
                     traceContext = "wireless-rfcomm",
                     onTrace = ::debugLog,
                 ).also { csm = it }
-                debugLog("wireless iAP2 CSM channel opened address=${device.address}")
+                if (BluetoothLinkGuard.markConnected(address)) {
+                    debugLog("wireless Bluetooth link up address=$address")
+                } else {
+                    // 同一个世代里的重复回调：不再播报，避免界面/系统提示重复。
+                    debugLog("suppressed duplicate Bluetooth connected announce address=$address")
+                }
+                debugLog("wireless iAP2 CSM channel opened address=$address")
                 return channel
             } catch (error: Exception) {
+                if (isStaleWirelessRun(generation)) {
+                    // 主动作废的这次不算失败，不进退避，只解锁并发标记。
+                    BluetoothLinkGuard.markAbandoned(address)
+                } else {
+                    BluetoothLinkGuard.markFailed(address)
+                }
                 closeBluetoothBootstrapTransport()
                 if (isStaleWirelessRun(generation)) throw error
                 lastFailure = error
-                debugLog("wireless RFCOMM attempt failed address=${device.address}", error)
+                debugLog("wireless RFCOMM attempt failed address=$address", error)
+            }
+        }
+        if (lastFailure == null && skipped.isNotEmpty()) {
+            // 所有候选都在退避/在飞：等最短的一档退避过去再重试一次，而不是立刻失败把整条
+            // 无线链路（热点 + Bonjour）拆掉重来。
+            val wait = skipped.minOf { BluetoothLinkGuard.cooldownRemainingMs(it) }
+            // 只允许等一轮：第二轮还全在退避说明这些手机确实连不上，直接带着失败原因返回，
+            // 不要递归下去把无线链路挂死在重试里。
+            if (cooldownPass == 0 && wait in 1 until COOLDOWN_WAIT_LIMIT_MILLIS) {
+                debugLog("wireless RFCOMM all candidates skipped; waiting $wait ms before retry")
+                if (!sleepForCooldown(wait, generation)) {
+                    throw IOException("Wireless Bluetooth connection was cancelled")
+                }
+                return connectWirelessBluetoothDevices(devices, generation, cooldownPass = 1)
             }
         }
         throw IOException(
@@ -1903,6 +1959,31 @@ class CarPlayController(
         )
     }
 
+    /**
+     * 只在"换了设备"时才更新状态条。同一个地址的重试不重复推 ConnectingBluetooth，
+     * 避免界面上原地反复闪「正在连接蓝牙」。
+     */
+    private fun announceConnectingBluetooth(address: String) {
+        if (lastBluetoothConnectingAddress == address) return
+        lastBluetoothConnectingAddress = address
+        onStatus(CarPlayStatus.ConnectingBluetooth)
+    }
+
+    /** 退避等待，按 100ms 切片，期间可被 generation 失效打断。 */
+    private fun sleepForCooldown(waitMillis: Long, generation: Int): Boolean {
+        var remaining = waitMillis
+        while (remaining > 0L) {
+            if (isStaleWirelessRun(generation)) return false
+            val slice = minOf(remaining, 100L)
+            try {
+                Thread.sleep(slice)
+            } catch (error: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+            remaining -= slice
+        }
+        return !isStaleWirelessRun(generation)
     private fun connectBluetoothSocket(socket: BluetoothSocket, address: String) {
         val result = AtomicReference<Throwable?>()
         val connected = CountDownLatch(1)
@@ -2307,6 +2388,8 @@ class CarPlayController(
          */
         private val WIRELESS_CONNECT_WATCHDOG_STEPS_MILLIS = longArrayOf(4_000L, 10_000L, 25_000L)
         private const val RFCOMM_CONNECT_TIMEOUT_MILLIS = 15_000L
+        /** 所有候选都在退避时，最多等这么久再去重试一次。 */
+        private const val COOLDOWN_WAIT_LIMIT_MILLIS = 9_000L
         private const val EXECUTOR_CLOSE_TIMEOUT_MILLIS = 2_000L
         private const val ADAPTER_ADDRESS_PLACEHOLDER = "02:00:00:00:00:00"
         private val BLUETOOTH_ADDRESS = Regex("^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")

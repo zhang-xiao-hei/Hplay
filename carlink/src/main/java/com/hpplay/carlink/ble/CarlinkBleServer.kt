@@ -22,6 +22,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.ParcelUuid
 import android.util.Log
+import com.hpplay.transport.BluetoothLinkGuard
 import java.util.UUID
 
 /**
@@ -191,18 +192,35 @@ class CarlinkBleServer(
     }
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    /**
+     * 广播保活：只在"广播确实掉了"时重启，重启时**不换序列号**。
+     *
+     * 之前的实现是每 20s 无条件 stop + start，而 start 会自增并落盘广播身份块里的序列号；
+     * 手机端按 (carId, serial) 去重，序列号一变就被当成一台"新"车机，于是每隔 20 秒弹一次
+     * 连接提示 —— 这就是现场看到的「蓝牙已连接」提示反复跳出的来源。现在只有真正断开重连
+     * （[onConnectionStateChange] 的 DISCONNECTED）才换号，保活沿用当前号。
+     */
     private val refreshAdvertising = object : Runnable {
         override fun run() {
             if (!running) return
-            // 手机正连着时不要重启广播，避免影响会话；断开后再换新序列号。
-            if (connectedDevice == null) runCatching { startAdvertising() }
+            if (connectedDevice == null && !advertisingStarted) {
+                Log.i(tag, "advertising lost; restarting without rotating serial")
+                runCatching { startAdvertising(rotateSerial = false) }
+                    .onFailure { Log.w(tag, "advertising keepalive restart failed", it) }
+            }
             mainHandler.postDelayed(this, ADVERTISING_REFRESH_MILLIS)
         }
     }
 
-    private fun startAdvertising() {
+    private fun startAdvertising(rotateSerial: Boolean = false) {
         mainHandler.removeCallbacks(refreshAdvertising)
         mainHandler.postDelayed(refreshAdvertising, ADVERTISING_REFRESH_MILLIS)
+        // 已经在广播、且这次不需要换号：什么都不做。反复 stop+start 会让手机侧的连接
+        // 一次次被打断，系统蓝牙栈就会反复弹「已连接」。
+        if (advertisingStarted && !rotateSerial && lastAdvertiseData != null) {
+            Log.i(tag, "advertising already running; keep serial=${serial} and skip restart")
+            return
+        }
         advertisingStarted = false
         if (advertiser == null) {
             lastAdvertisingError = "no BLE advertiser (peripheral mode unsupported)"
@@ -220,7 +238,7 @@ class CarlinkBleServer(
         // 手机端扫描 Filter 只认 FCFB + 00000001 这段身份数据，缺了它认不出是 CarLink 车机。
         // 载荷只构造一次：身份块里的序列号每构造一次就自增并落盘，若为了打日志再构造一遍，
         // 真正广播出去的序列号会和日志/落盘的差一拍，排查"这版到底广播了什么"时会看错。
-        val payload = buildAdvertisingPayload()
+        val payload = buildAdvertisingPayload(rotateSerial)
         val data = AdvertiseData.Builder()
             .addServiceUuid(ParcelUuid(UUID.fromString(CarlinkBleUuids.ADV_SERVICE)))
             .addServiceData(
@@ -350,7 +368,7 @@ class CarlinkBleServer(
     }
 
     /** 构造 00000001 身份块（对齐 pgy buildUnionAdvertiseData）。 */
-    private fun buildAdvertisingPayload(): ByteArray {
+    private fun buildAdvertisingPayload(rotateSerial: Boolean): ByteArray {
         val out = java.io.ByteArrayOutputStream()
         // 协议版本 "x.y" → 2 字节（各段 parseInt 取低字节）
         val version = PROTOCOL_VERSION.split(".")
@@ -360,13 +378,15 @@ class CarlinkBleServer(
         } else {
             out.write(1); out.write(7)
         }
-        // 序列号 1 字节：每次开始广播自增并持久化。手机端按 (carId, serial) 去重，
-        // 若每次都发同一个序列号，第二次之后会被当成"已经见过的广播"直接忽略——表现就是
-        // 第一次能弹窗、之后再怎么试都不弹。
-        val nextSerial = runCatching {
-            com.hpplay.AirPlayPersistence.nextCarlinkAdvertisingSerial(context)
-        }.getOrElse { (serial + 1) and 0xFF }
-        serial = nextSerial
+        // 序列号 1 字节。手机端按 (carId, serial) 去重：
+        //  - 只有"新一轮可被连接"的场合才自增并落盘（首次开广播、链路断开后重新广播）；
+        //  - 保活/重试沿用当前号，否则手机每 20s 就把同一条广播当成新车机、再弹一次提示。
+        if (rotateSerial || serial == 0) {
+            val nextSerial = runCatching {
+                com.hpplay.AirPlayPersistence.nextCarlinkAdvertisingSerial(context)
+            }.getOrElse { (serial + 1) and 0xFF }
+            serial = nextSerial
+        }
         out.write(serial)
         // carId 前 6 字节（hex 串解码）
         val carId = carIdHex()
@@ -461,6 +481,7 @@ class CarlinkBleServer(
 
         override fun onAdvertisingSetStopped(set: AdvertisingSet?) {
             Log.i(tag, "advertising set stopped")
+            advertisingStarted = false
         }
     }
 
@@ -480,24 +501,48 @@ class CarlinkBleServer(
         }
     }
 
+    /**
+     * 断开后延迟重启广播（换新序列号）。断开/重连抖动时会被 [mainHandler] 取消再重排，
+     * 保证一个世代里只开一轮广播。
+     */
+    private val restartAdvertisingAfterDisconnect = object : Runnable {
+        override fun run() {
+            if (!running || connectedDevice != null) return
+            runCatching { startAdvertising(rotateSerial = true) }
+                .onFailure { Log.w(tag, "restart advertising after disconnect failed", it) }
+        }
+    }
+
     private val gattCallback = object : BluetoothGattServerCallback() {
         override fun onConnectionStateChange(device: BluetoothDevice?, status: Int, newState: Int) {
             val name = runCatching { device?.name }.getOrNull()
+            val address = device?.address
             if (newState == android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
+                if (device == null || address == null) return
+                // 有的 ROM 会连发两三次 STATE_CONNECTED。这里按地址去重：只有本世代第一次才算
+                // "新连接"，后续重复回调不再走 onPhoneConnected，宿主也就不会再弹一次连接提示。
+                val firstOfEpoch = BluetoothLinkGuard.markConnected(address)
                 connectedDevice = device
-                Log.i(tag, "phone connected: $name (${device?.address})")
-                listener.onPhoneConnected(name)
+                mainHandler.removeCallbacks(restartAdvertisingAfterDisconnect)
+                if (firstOfEpoch) {
+                    Log.i(tag, "phone connected: $name ($address)")
+                    listener.onPhoneConnected(name)
+                } else {
+                    Log.i(tag, "duplicate STATE_CONNECTED ignored: $name ($address)")
+                }
             } else if (newState == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED) {
-                if (connectedDevice?.address == device?.address) {
+                val wasCurrent = connectedDevice?.address == address
+                if (wasCurrent) {
                     connectedDevice = null
                     subscribed = false
+                    address?.let { BluetoothLinkGuard.markDisconnected(it) }
                 }
-                Log.i(tag, "phone disconnected: $name")
-                // 手机端按 (carId, serial) 去重：每次断开后换一个序列号重新广播，
-                // 下一次连接尝试才会被当成"新广播"再次弹窗。
-                mainHandler.postDelayed({
-                    if (running) runCatching { startAdvertising() }
-                }, 1500)
+                Log.i(tag, "phone disconnected: $name ($address) current=$wasCurrent")
+                // 断开后重新广播：换一个新序列号（手机端按 (carId, serial) 去重，只有新号才会
+                // 再次被当成"可连接的车机"）。先取消排队中的上一轮重启，避免断开/重连抖动时
+                // 连着开好几轮广播 —— 那是手机端提示反复弹出的另一半来源。
+                mainHandler.removeCallbacks(restartAdvertisingAfterDisconnect)
+                mainHandler.postDelayed(restartAdvertisingAfterDisconnect, 1500)
             }
         }
 
@@ -610,6 +655,9 @@ class CarlinkBleServer(
         if (!running) return
         running = false
         advertisingStarted = false
+        mainHandler.removeCallbacks(refreshAdvertising)
+        mainHandler.removeCallbacks(restartAdvertisingAfterDisconnect)
+        connectedDevice?.address?.let { BluetoothLinkGuard.markDisconnected(it) }
         // 停扩展广播（startAdvertisingSet 对应 stopAdvertisingSet）与经典广播两条路径。
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             runCatching { advertiser?.stopAdvertisingSet(advertiseSetCallback) }
