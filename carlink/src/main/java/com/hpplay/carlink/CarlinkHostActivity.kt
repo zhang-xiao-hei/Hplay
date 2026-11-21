@@ -25,6 +25,7 @@ import com.hpplay.carlink.ble.ServerInfo
 import com.hpplay.carlink.channel.CarlinkControl
 import com.hpplay.carlink.net.CarlinkHotspot
 import com.hpplay.host.R
+import kotlin.math.roundToInt
 
 /**
  * CarLink 宿主界面（Hplay 内实现）。
@@ -338,6 +339,13 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
             runOnUiThread {
                 if (!videoReady) {
                     videoReady = true
+                    // 记下这一路投屏真实的编码分辨率：设置页里「用上次投屏分辨率」就是取它，
+                    // 用户不必自己去猜手机编出来的是 1920x1080 还是 1280x720。
+                    com.hpplay.CarlinkOverlayPrefs.saveStreamResolution(
+                        this,
+                        ctrl.videoSink.streamWidth,
+                        ctrl.videoSink.streamHeight,
+                    )
                     idleOverlay?.visibility = View.GONE
                     card.visibility = View.GONE
                     // 链接成功后隐藏右上角「切换协议」按钮，避免驾驶中误触。
@@ -875,6 +883,21 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
         applyOverlayPrefs()
     }
 
+    // applyOverlayPrefs 的坐标基准：存的是「基准分辨率」下的像素，落到当前窗口要按比例换算。
+    // 车上常见组合是手机 1920x1080 / 车机 1280x720，直接拿像素落位会偏出屏幕。
+    private var overlayBasisW = 0
+    private var overlayBasisH = 0
+    private var overlayPanelW = 0
+    private var overlayPanelH = 0
+
+    private fun scaledX(x: Int): Int =
+        if (x < 0 || overlayBasisW <= 0) x
+        else (x.toFloat() * overlayPanelW / overlayBasisW).roundToInt()
+
+    private fun scaledY(y: Int): Int =
+        if (y < 0 || overlayBasisH <= 0) y
+        else (y.toFloat() * overlayPanelH / overlayBasisH).roundToInt()
+
     /**
      * 应用「投屏界面按钮」设置：显隐 + 像素级位置。
      *
@@ -884,11 +907,18 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
      */
     private fun applyOverlayPrefs() {
         val overlay = com.hpplay.CarlinkOverlayPrefs.load(this)
+        overlayPanelW = rootViewRef?.width?.takeIf { it > 0 }
+            ?: resources.displayMetrics.widthPixels
+        overlayPanelH = rootViewRef?.height?.takeIf { it > 0 }
+            ?: resources.displayMetrics.heightPixels
+        val basis = overlay.basis(overlayPanelW, overlayPanelH)
+        overlayBasisW = basis.first
+        overlayBasisH = basis.second
         exitLinkButton?.let { exit ->
             val lp = exit.layoutParams as? FrameLayout.LayoutParams ?: return@let
             if (overlay.exitX >= 0) {
                 lp.gravity = Gravity.TOP or Gravity.START
-                lp.leftMargin = overlay.exitX
+                lp.leftMargin = scaledX(overlay.exitX)
                 lp.marginStart = 0
                 lp.rightMargin = 0
             } else {
@@ -896,7 +926,7 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
                 lp.leftMargin = dp(16)
                 lp.marginStart = dp(16)
             }
-            lp.topMargin = if (overlay.exitY >= 0) overlay.exitY else dp(14)
+            lp.topMargin = if (overlay.exitY >= 0) scaledY(overlay.exitY) else dp(14)
             exit.layoutParams = lp
             val visible = videoReady && overlay.showExit
             exit.visibility = if (visible) View.VISIBLE else View.GONE
@@ -906,7 +936,7 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
             if (overlay.settingsX >= 0) {
                 // 用户给了绝对像素：改成「距屏幕左侧 X」定位，右对齐偏移全部清零。
                 lp.gravity = Gravity.TOP or Gravity.START
-                lp.leftMargin = overlay.settingsX
+                lp.leftMargin = scaledX(overlay.settingsX)
                 lp.marginStart = 0
                 lp.marginEnd = 0
                 lp.rightMargin = 0
@@ -917,7 +947,7 @@ class CarlinkHostActivity : com.hpplay.LanguageAwareActivity() {
                 lp.marginStart = 0
                 lp.marginEnd = dp(16)
             }
-            lp.topMargin = if (overlay.settingsY >= 0) overlay.settingsY else dp(72)
+            lp.topMargin = if (overlay.settingsY >= 0) scaledY(overlay.settingsY) else dp(72)
             gear.layoutParams = lp
             val visible = videoReady && overlay.showSettings
             gear.visibility = if (visible) View.VISIBLE else View.GONE

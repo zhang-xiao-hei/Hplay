@@ -15,6 +15,9 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.hpplay.CarlinkOverlayPrefs
 
 /**
@@ -38,6 +41,11 @@ class CarlinkOverlaySettingsActivity : com.hpplay.LanguageAwareActivity() {
     private lateinit var settingsYField: EditText
 
     private lateinit var preview: FrameLayout
+    private lateinit var previewLabel: TextView
+    private lateinit var basisLabel: TextView
+    private lateinit var streamLabel: TextView
+    private lateinit var basisWField: EditText
+    private lateinit var basisHField: EditText
     private lateinit var exitChip: TextView
     private lateinit var settingsChip: TextView
     private var previewWidth = 0
@@ -73,6 +81,7 @@ class CarlinkOverlaySettingsActivity : com.hpplay.LanguageAwareActivity() {
         screenWidth = dm.widthPixels.coerceAtLeast(1)
         screenHeight = dm.heightPixels.coerceAtLeast(1)
         prefs = CarlinkOverlayPrefs.load(this)
+        restoreSystemBars()
         setContentView(buildRoot())
         syncFields()
     }
@@ -83,7 +92,8 @@ class CarlinkOverlaySettingsActivity : com.hpplay.LanguageAwareActivity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(bg)
-            setPadding(dp(20), dp(18), dp(20), dp(18))
+            // 底部留出固定动作栏的高度，否则最后一段内容会被「返回 / 保存」压住。
+            setPadding(dp(20), dp(18), dp(20), dp(96))
         }
 
         root.addView(TextView(this).apply {
@@ -93,8 +103,8 @@ class CarlinkOverlaySettingsActivity : com.hpplay.LanguageAwareActivity() {
             typeface = Typeface.DEFAULT_BOLD
         })
         root.addView(TextView(this).apply {
-            text = "连接成功后，CarLink 投屏画面上会叠这两个小按钮。位置按屏幕绝对像素计" +
-                "（左上角为 0,0），留空或填 -1 表示跟随默认布局。"
+            text = "连接成功后，CarLink 投屏画面上会叠这两个小按钮。位置按下方「坐标基准」" +
+                "的绝对像素计（左上角为 0,0），留空或填 -1 表示跟随默认布局。"
             setTextColor(subColor)
             textSize = 13f
             setLineSpacing(dp(3).toFloat(), 1f)
@@ -132,12 +142,13 @@ class CarlinkOverlaySettingsActivity : com.hpplay.LanguageAwareActivity() {
         root.addView(sectionTitle("拖动预览（松手即保存）"))
         preview = FrameLayout(this).apply {
             setBackgroundDrawable(rounded(card, 14, border))
-            addView(TextView(this@CarlinkOverlaySettingsActivity).apply {
-                text = "车机屏幕 ${screenWidth}x${screenHeight}"
+            previewLabel = TextView(this@CarlinkOverlaySettingsActivity).apply {
+                text = "坐标基准 ${basisW()}x${basisH()}px"
                 setTextColor(subColor)
                 textSize = 11f
                 setPadding(dp(12), dp(10), 0, 0)
-            })
+            }
+            addView(previewLabel)
         }
         root.addView(preview, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(220),
@@ -152,7 +163,11 @@ class CarlinkOverlaySettingsActivity : com.hpplay.LanguageAwareActivity() {
             applyPreview()
         }
 
-        // 3. 像素输入
+        // 3. 分辨率基准
+        root.addView(sectionTitle("分辨率基准"))
+        root.addView(buildResolutionCard())
+
+        // 4. 像素输入
         root.addView(sectionTitle("像素坐标"))
         val posCard = card()
         exitXField = numberField()
@@ -201,9 +216,202 @@ class CarlinkOverlaySettingsActivity : com.hpplay.LanguageAwareActivity() {
         }
         root.addView(footer)
 
-        return ScrollView(this).apply {
+        val scroll = ScrollView(this).apply {
             addView(root)
             setBackgroundColor(bg)
+            isFillViewport = true
+        }
+        // 底部固定动作栏：以前这一页只能靠「滑块松手即存」隐式保存，也没有返回按钮，
+        // 父页面又是全屏（无系统栏），进去就找不到出口。现在显式给「返回」「保存」。
+        return FrameLayout(this).apply {
+            setBackgroundColor(bg)
+            addView(scroll, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ))
+            addView(buildBottomBar(), FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM,
+            ))
+        }
+    }
+
+    /** 底部动作栏：左「返回」（不保存改动，直接退出），右「保存」（写盘并保留在本页）。 */
+    private fun buildBottomBar(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(20), dp(10), dp(20), dp(12))
+        setBackgroundColor(bg)
+        addView(actionButton("返回", subColor, textColor) { finish() },
+            LinearLayout.LayoutParams(0, dp(46), 1f))
+        addView(View(this@CarlinkOverlaySettingsActivity).apply { },
+            LinearLayout.LayoutParams(dp(12), dp(1)))
+        addView(actionButton("保存", accent, Color.WHITE) {
+            persist()
+            toast("已保存")
+        }, LinearLayout.LayoutParams(0, dp(46), 1f))
+    }
+
+    private fun actionButton(label: String, fill: Int, ink: Int, onClick: () -> Unit): TextView =
+        TextView(this).apply {
+            text = label
+            gravity = Gravity.CENTER
+            setTextColor(ink)
+            textSize = 15f
+            typeface = Typeface.DEFAULT_BOLD
+            background = rounded(fill, 10, if (fill == accent) accent else border)
+            setOnClickListener { onClick() }
+        }
+
+    /** 本页要有系统栏：父页面（共享设置宿主）可能按投屏设置隐藏了状态栏/导航栏，
+     *  那样子页面既没有返回键也没有可视出口。这里无条件把两条栏放回来。 */
+    private fun restoreSystemBars() {
+        runCatching {
+            WindowCompat.setDecorFitsSystemWindows(window, true)
+            val controller = WindowInsetsControllerCompat(window, window.decorView)
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
+            controller.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    // -------------------------------------------------------------- resolution
+
+    /** 坐标基准宽：用户设过就用设的，否则跟随当前窗口。 */
+    private fun basisW(): Int = if (prefs.basisWidth > 0) prefs.basisWidth else screenWidth
+
+    private fun basisH(): Int = if (prefs.basisHeight > 0) prefs.basisHeight else screenHeight
+
+    /**
+     * 分辨率基准卡片：当前软件分辨率 / 上次投屏分辨率 / 自定义。
+     *
+     * 为什么需要它：坐标是屏幕绝对像素，而车机面板分辨率和手机编出来的投屏分辨率常常不同
+     * （1280×720 对 1920×1080）。用一个明确的基准换算，才不会再出现"在预览里拖到右下角、
+     * 实车上跑到屏幕外"。
+     */
+    private fun buildResolutionCard(): View {
+        val cardView = card()
+        basisLabel = TextView(this).apply {
+            setTextColor(textColor)
+            textSize = 14f
+            setPadding(0, dp(12), 0, dp(2))
+        }
+        streamLabel = TextView(this).apply {
+            setTextColor(subColor)
+            textSize = 12f
+            setLineSpacing(dp(3).toFloat(), 1f)
+        }
+        val presetRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(10), 0, dp(2))
+        }
+        presetRow.addView(presetButton("用当前分辨率") {
+            applyBasis(screenWidth, screenHeight, "坐标基准已设为当前屏幕")
+        }, LinearLayout.LayoutParams(0, dp(42), 1f))
+        presetRow.addView(View(this@CarlinkOverlaySettingsActivity).apply { },
+            LinearLayout.LayoutParams(dp(10), dp(1)))
+        presetRow.addView(presetButton("用上次投屏分辨率") {
+            val w = prefs.streamWidth
+            val h = prefs.streamHeight
+            if (w <= 0 || h <= 0) {
+                toast("还没有投屏记录，先连一次 CarLink")
+            } else {
+                applyBasis(w, h, "坐标基准已设为上次投屏 $w x $h")
+            }
+        }, LinearLayout.LayoutParams(0, dp(42), 1f))
+
+        basisWField = numberField()
+        basisHField = numberField()
+        val customRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(10), 0, dp(12))
+            addView(TextView(this@CarlinkOverlaySettingsActivity).apply {
+                text = "自定义"
+                setTextColor(textColor)
+                textSize = 14f
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(smallLabel("W"))
+            addView(basisWField, LinearLayout.LayoutParams(dp(76), ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(smallLabel(" H"))
+            addView(basisHField, LinearLayout.LayoutParams(dp(76), ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        val applyRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, dp(8))
+        }
+        applyRow.addView(presetButton("应用自定义分辨率") {
+            val w = basisWField.text?.toString()?.trim()?.toIntOrNull() ?: 0
+            val h = basisHField.text?.toString()?.trim()?.toIntOrNull() ?: 0
+            if (w <= 0 || h <= 0) {
+                toast("宽高都要填正整数")
+            } else {
+                applyBasis(w, h, "坐标基准已设为自定义 $w x $h")
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)))
+
+        cardView.addView(basisLabel)
+        cardView.addView(streamLabel)
+        cardView.addView(presetRow)
+        cardView.addView(customRow)
+        cardView.addView(applyRow)
+        updateBasisLabels()
+        return cardView
+    }
+
+    private fun presetButton(label: String, onClick: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        gravity = Gravity.CENTER
+        setTextColor(accent)
+        textSize = 13f
+        typeface = Typeface.DEFAULT_BOLD
+        setPadding(dp(6), 0, dp(6), 0)
+        background = rounded(card, 9, border)
+        setOnClickListener { onClick() }
+    }
+
+    /**
+     * 切换坐标基准，并把已有坐标从旧基准等比换算到新基准。
+     *
+     * 不换算的话，改基准会让按钮"跳"到别处：同一组像素在 1280 与 1920 的画面上代表两个位置。
+     */
+    private fun applyBasis(width: Int, height: Int, note: String) {
+        if (width <= 0 || height <= 0) {
+            toast("分辨率无效")
+            return
+        }
+        val oldW = basisW()
+        val oldH = basisH()
+        fun rescale(value: Int, oldSpan: Int, newSpan: Int): Int =
+            if (value == CarlinkOverlayPrefs.AUTO || oldSpan <= 0) value
+            else (value.toFloat() * newSpan / oldSpan).toInt()
+
+        prefs = prefs.copy(
+            exitX = rescale(prefs.exitX, oldW, width),
+            exitY = rescale(prefs.exitY, oldH, height),
+            settingsX = rescale(prefs.settingsX, oldW, width),
+            settingsY = rescale(prefs.settingsY, oldH, height),
+            basisWidth = width,
+            basisHeight = height,
+        )
+        syncFields()
+        persist()
+        applyPreview()
+        toast(note)
+    }
+
+    private fun updateBasisLabels() {
+        if (!::basisLabel.isInitialized) return
+        basisLabel.text = "坐标基准 ${basisW()} x ${basisH()} px"
+        streamLabel.text = "当前软件分辨率 ${screenWidth}x${screenHeight}" +
+            if (prefs.streamWidth > 0 && prefs.streamHeight > 0) {
+                "　上次投屏 ${prefs.streamWidth}x${prefs.streamHeight}"
+            } else {
+                "　上次投屏 未记录"
+            }
+        if (::basisWField.isInitialized) {
+            basisWField.setText(basisW().toString())
+            basisHField.setText(basisH().toString())
         }
     }
 
@@ -335,7 +543,11 @@ class CarlinkOverlaySettingsActivity : com.hpplay.LanguageAwareActivity() {
 
         placeChip(exitChip, ex, ey, prefs.showExit)
         placeChip(settingsChip, sx, sy, prefs.showSettings)
-        footer.text = "当前：退出 ${ex},${ey}px ${if (prefs.showExit) "显示" else "隐藏"}" +
+        updateBasisLabels()
+        previewLabel.text = "坐标基准 ${basisW()}x${basisH()}px　预览比例 " +
+            "${"%.2f".format(previewWidth.toFloat() / basisW())}x"
+        footer.text = "基准 ${basisW()}x${basisH()}px：退出 ${ex},${ey}px " +
+            "${if (prefs.showExit) "显示" else "隐藏"}" +
             "　设置在 ${sx},${sy}px ${if (prefs.showSettings) "显示" else "隐藏"}"
     }
 
@@ -345,8 +557,9 @@ class CarlinkOverlaySettingsActivity : com.hpplay.LanguageAwareActivity() {
 
     private fun placeChip(chip: View, xPx: Int, yPx: Int, visible: Boolean) {
         chip.visibility = if (visible) View.VISIBLE else View.GONE
-        val scaleX = previewWidth.toFloat() / screenWidth
-        val scaleY = previewHeight.toFloat() / screenHeight
+        // 预览框代表的是「坐标基准」那一张画布，而不是本页窗口——基准和窗口分辨率可能不同。
+        val scaleX = previewWidth.toFloat() / basisW()
+        val scaleY = previewHeight.toFloat() / basisH()
         val lp = (chip.layoutParams as? FrameLayout.LayoutParams
             ?: FrameLayout.LayoutParams(dp(56), dp(30)))
         lp.leftMargin = (xPx * scaleX).toInt()
@@ -372,8 +585,8 @@ class CarlinkOverlaySettingsActivity : com.hpplay.LanguageAwareActivity() {
                 }
                 MotionEvent.ACTION_MOVE -> {
                     if (previewWidth <= 0 || previewHeight <= 0) return@setOnTouchListener false
-                    val scaleX = previewWidth.toFloat() / screenWidth
-                    val scaleY = previewHeight.toFloat() / screenHeight
+                    val scaleX = previewWidth.toFloat() / basisW()
+                    val scaleY = previewHeight.toFloat() / basisH()
                     val newMarginX = (startMarginX + (event.rawX - downX)).toInt()
                         .coerceIn(0, previewWidth - view.width)
                     val newMarginY = (startMarginY + (event.rawY - downY)).toInt()
@@ -420,6 +633,7 @@ class CarlinkOverlaySettingsActivity : com.hpplay.LanguageAwareActivity() {
         )
         showExitSwitch.isChecked = prefs.showExit
         showSettingsSwitch.isChecked = prefs.showSettings
+        updateBasisLabels()
     }
 
     private fun parsed(field: EditText, current: Int): Int {

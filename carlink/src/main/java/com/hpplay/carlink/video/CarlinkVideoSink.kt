@@ -60,6 +60,11 @@ class CarlinkVideoSink : CarlinkSinkListener {
     /** 视频即将开始（拿到 mime/尺寸）时回调，宿主据此显示 SurfaceView、隐藏等待卡片。 */
     @Volatile var onVideoStarted: (() -> Unit)? = null
 
+    /** 最近一次上报的流分辨率（手机侧编码出来的画面尺寸）；未就绪时是默认 1280x720。 */
+    val streamWidth: Int get() = videoW
+
+    val streamHeight: Int get() = videoH
+
     override fun onVideoInitialized(dev: String?, mime: String?, width: Int, height: Int) {
         videoMime = when {
             mime == null -> "video/avc"

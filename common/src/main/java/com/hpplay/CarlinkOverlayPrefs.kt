@@ -11,8 +11,9 @@ import android.content.Context
  *
  * 约定：
  *  - [AUTO]（-1）表示用宿主内置的默认位置（退出在左上、设置在右上第二行）；
- *  - 其余值就是**屏幕绝对像素**（相对宿主根布局左上角），与车机分辨率一一对应，
- *    用户量出来的坐标可以直接填。
+ *  - 其余值就是**坐标基准分辨率下的绝对像素**（基准是 [Overlay.basisWidth]/[Overlay.basisHeight]，
+ *    未设置时等于宿主当前窗口尺寸）。基准与当前画面尺寸不一致时，宿主按比例换算后再落位，
+ *    这样 1280×720 的存档换到 1920×1080 的机子上不会跑到屏幕外。
  */
 object CarlinkOverlayPrefs {
 
@@ -23,6 +24,10 @@ object CarlinkOverlayPrefs {
     private const val KEY_EXIT_Y = "exit_y"
     private const val KEY_SETTINGS_X = "settings_x"
     private const val KEY_SETTINGS_Y = "settings_y"
+    private const val KEY_BASIS_W = "basis_w"
+    private const val KEY_BASIS_H = "basis_h"
+    private const val KEY_STREAM_W = "stream_w"
+    private const val KEY_STREAM_H = "stream_h"
 
     /** 位置未设置：跟随宿主默认布局。 */
     const val AUTO = -1
@@ -34,12 +39,26 @@ object CarlinkOverlayPrefs {
         val exitY: Int,
         val settingsX: Int,
         val settingsY: Int,
+        /** 坐标基准分辨率；0 表示未设置，按宿主当前窗口尺寸解释。 */
+        val basisWidth: Int = 0,
+        val basisHeight: Int = 0,
+        /** 上一次投屏实际使用的编码分辨率（手机侧），仅作参考 / 一键选用。 */
+        val streamWidth: Int = 0,
+        val streamHeight: Int = 0,
     ) {
         /** 退出按钮是否给了绝对坐标。 */
         val exitHasPosition: Boolean get() = exitX != AUTO || exitY != AUTO
 
         /** 设置按钮是否给了绝对坐标。 */
         val settingsHasPosition: Boolean get() = settingsX != AUTO || settingsY != AUTO
+
+        /** 坐标基准：存过就用存的，没存过就等于当前画面尺寸（兼容老存档）。 */
+        fun basis(panelWidth: Int, panelHeight: Int): Pair<Int, Int> =
+            if (basisWidth > 0 && basisHeight > 0) {
+                basisWidth to basisHeight
+            } else {
+                panelWidth.coerceAtLeast(1) to panelHeight.coerceAtLeast(1)
+            }
     }
 
     fun load(context: Context): Overlay {
@@ -51,6 +70,10 @@ object CarlinkOverlayPrefs {
             exitY = prefs.getInt(KEY_EXIT_Y, AUTO),
             settingsX = prefs.getInt(KEY_SETTINGS_X, AUTO),
             settingsY = prefs.getInt(KEY_SETTINGS_Y, AUTO),
+            basisWidth = prefs.getInt(KEY_BASIS_W, 0),
+            basisHeight = prefs.getInt(KEY_BASIS_H, 0),
+            streamWidth = prefs.getInt(KEY_STREAM_W, 0),
+            streamHeight = prefs.getInt(KEY_STREAM_H, 0),
         )
     }
 
@@ -62,6 +85,10 @@ object CarlinkOverlayPrefs {
             .putInt(KEY_EXIT_Y, overlay.exitY)
             .putInt(KEY_SETTINGS_X, overlay.settingsX)
             .putInt(KEY_SETTINGS_Y, overlay.settingsY)
+            .putInt(KEY_BASIS_W, overlay.basisWidth)
+            .putInt(KEY_BASIS_H, overlay.basisHeight)
+            .putInt(KEY_STREAM_W, overlay.streamWidth)
+            .putInt(KEY_STREAM_H, overlay.streamHeight)
             .apply()
     }
 
@@ -79,8 +106,33 @@ object CarlinkOverlayPrefs {
             .apply()
     }
 
-    /** 恢复默认：两个按钮都显示，位置回落到宿主默认布局。 */
+    /**
+     * 记下本次投屏真实的编码分辨率（手机侧）。设置页据此给出「用上次投屏分辨率」一键基准；
+     * 只写分辨率，不动显隐和坐标，所以可以在每次视频就绪时随手调用。
+     */
+    fun saveStreamResolution(context: Context, width: Int, height: Int) {
+        if (width <= 0 || height <= 0) return
+        context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
+            .putInt(KEY_STREAM_W, width)
+            .putInt(KEY_STREAM_H, height)
+            .apply()
+    }
+
+    /** 恢复默认：两个按钮都显示，位置回落到宿主默认布局，坐标基准清掉（按当前画面解释）。 */
     fun reset(context: Context) {
-        save(context, Overlay(true, true, AUTO, AUTO, AUTO, AUTO))
+        val current = load(context)
+        save(
+            context,
+            Overlay(
+                showExit = true,
+                showSettings = true,
+                exitX = AUTO,
+                exitY = AUTO,
+                settingsX = AUTO,
+                settingsY = AUTO,
+                streamWidth = current.streamWidth,
+                streamHeight = current.streamHeight,
+            ),
+        )
     }
 }

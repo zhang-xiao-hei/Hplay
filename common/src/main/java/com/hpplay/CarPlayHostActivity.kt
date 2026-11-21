@@ -7040,6 +7040,8 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
         refreshRailPresence()
         settingsBaseline = captureSettingsBaseline()
         menuOpen = true
+        // 进设置立刻把系统栏放回来（菜单打开时 applyFullscreenMode 会强制显示两条栏）。
+        applyFullscreenMode()
         handshakeResetInProgress = true
         startAfterHandshakeReset = false
         hotspotStatus = HotspotStatus(
@@ -7153,6 +7155,8 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
         if (!menuOpen) return
         stopMicrophoneGainTest()
         menuOpen = false
+        // 退出设置时按投屏的「全屏」开关恢复（用户开着全屏就继续全屏，关着就留系统栏）。
+        applyFullscreenMode()
         settingsMenu?.visibility = View.GONE
         gestureOverlay?.visibility = View.VISIBLE
         updateDebugOverlays()
@@ -7559,8 +7563,12 @@ class CarPlayHostActivity : ComponentActivity(), VideoHost {
      * flags again, which is what brings the bars back.
      */
     private fun applyFullscreenMode() {
-        val hideTop = hideTopBar
-        val hideBottom = hideBottomBar
+        // 设置界面（含 CarLife / CarLink 以 settingsOnlyMode 打开的共享设置宿主，以及本页的
+        // 设置菜单）永远不隐藏系统栏：之前这里不分场景照抄投屏的「全屏」开关，进设置后
+        // 既没有状态栏也没有导航栏，既看不到返回入口也退不出去，表现就是"强行全屏"。
+        val settingsSurface = settingsOnlyMode || menuOpen
+        val hideTop = hideTopBar && !settingsSurface
+        val hideBottom = hideBottomBar && !settingsSurface
         val immersive = hideTop || hideBottom
         WindowCompat.setDecorFitsSystemWindows(window, !immersive)
         val controller = WindowInsetsControllerCompat(window, window.decorView)
