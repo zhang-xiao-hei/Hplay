@@ -1984,6 +1984,8 @@ class CarPlayController(
             remaining -= slice
         }
         return !isStaleWirelessRun(generation)
+    }
+
     private fun connectBluetoothSocket(socket: BluetoothSocket, address: String) {
         val result = AtomicReference<Throwable?>()
         val connected = CountDownLatch(1)
