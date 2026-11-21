@@ -1,0 +1,30 @@
+name: Tidy 1.9.188
+
+# 一次性：删掉排障 Release 与临时分支，避免仓库里堆一次性工作流。
+on:
+  push:
+    branches:
+      - tidy-188
+
+permissions:
+  contents: write
+
+jobs:
+  tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tidy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          R=zhang-xiao-hei/Hplay
+          gh -R "$R" release delete diag-188 -y || true
+          gh -R "$R" release delete diag-187 -y || true
+          for b in apply-188 apply-188b apply-188c diag-188b diag-188c diag-188d fire-187 cleanup-187; do
+            gh api --method DELETE "repos/$R/git/refs/heads/$b" || echo "skip $b"
+          done
+          echo '--- branches now'
+          gh api "repos/$R/branches?per_page=100" --jq '.[].name' || true
+          echo '--- v1.9.188 assets'
+          gh -R "$R" release view v1.9.188 --json assets --jq '.assets[] | "\(.name) \(.size)"' || true
